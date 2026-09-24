@@ -27,7 +27,7 @@ import { TweenUtil } from "db://assets/Framework/Utils/TweenUtil";
 import { AnimationHelper } from "db://assets/Framework/Core/AnimationHelper";
 import { DataKey } from "db://assets/Framework/Core/GameConst";
 import { ShareManager } from "db://assets/Framework/Core/ShareManager";
-import { GameObjectPool } from "./Pool/GameObjectPool"; // ✅ 新增：导入对象池
+import { GameObjectPool } from "./Pool/GameObjectPool";
 
 declare const wx: any;
 
@@ -121,9 +121,10 @@ export class App {
     private bindLifeCycle(): void {
         if (typeof wx === "undefined") return;
         wx.onHide(() => {
-            Logger.info(LogModule.APP, "进入后台");
+            Logger.info(LogModule.APP, "进入后台，触发强制同步落盘");
             DataCenter.Instance.set(DataKey.LAST_ONLINE_TIMESTAMP, Date.now());
-            SaveManager.Instance.saveToDisk();
+            // ✅ 核心闭环：在系统挂起/杀进程前，绕过异步 I/O 队列，强制主线程阻塞式刷写硬盘
+            SaveManager.Instance.saveToDisk(true);
         });
         wx.onShow(() => {
             Logger.info(LogModule.APP, "回到前台");
@@ -153,9 +154,7 @@ export class App {
     public beforeSceneChange(): void {
         try { TweenUtil.stopAll(); } catch (e) { Logger.warn(LogModule.APP, "TweenUtil.stopAll 异常", e); }
         try { AnimationHelper.clearAll(); } catch (e) { Logger.warn(LogModule.APP, "AnimationHelper.clearAll 异常", e); }
-        ResManager.Instance.clearNonPermanent();
-
-        // ✅ 核心闭环修复：解除注释，切场景时彻底清空对象池
+        //ResManager.Instance.clearNonPermanent();
         try { GameObjectPool.Instance.clearAll(); } catch (e) { Logger.warn(LogModule.APP, "GameObjectPool.clearAll 异常", e); }
 
         Logger.info(LogModule.APP, "场景切换清理完成");

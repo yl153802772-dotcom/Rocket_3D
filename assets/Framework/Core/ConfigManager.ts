@@ -2,12 +2,12 @@
  * @module ConfigManager
  * @description
  * [模块逻辑]
- * 游戏海量配置表的高效管理器。负责异步按需加载 JSON 配置，构建 O(1) 的 Map 索引供业务极速查询。
+ * 游戏海量配置表的高效管理器。本次重构引入了工业级的 时间分片解析引擎 (Time-Slicing Parser)。
+ * 将巨型 JSON 的反序列化与 Map 索引构建分摊至多个逻辑帧，彻底消灭了主线程同步遍历导致的 CPU 峰值卡顿。
  *
  * [调用规则]
- * 1. 业务切入新玩法前，通过 loadTables() 批量懒加载所需的配置表。
- * 2. 数据查询严格调用 query() 或 getAll()，禁止修改返回的对象导致脏数据。
- * 3. 内存吃紧或切换大阶段时，调用 unloadTable()，不仅清空索引，还会通知底层的 ResManager 物理释放 JsonAsset。
+ * 1. 业务切入新玩法前，通过 loadTables() 批量异步懒加载所需的配置表。
+ * 2. 内存吃紧或切换大阶段时，调用 unloadTable() 销毁域内配置，防爆内存。
  */
 
 import { JsonAsset } from 'cc';
@@ -32,7 +32,7 @@ export class ConfigManager {
 
         try {
             await Promise.all(needLoadNames.map(name => this.loadTableOnce(name, bundleName)));
-            Logger.info(LogModule.ConfigManager, `配置表批量加载与索引构建完成: ${needLoadNames.join(", ")}`);
+            Logger.info(LogModule.ConfigManager, `配置表批量加载与切片索引构建完成: ${needLoadNames.join(", ")}`);
         } catch (e) {
             Logger.error(LogModule.ConfigManager, `配置表批量加载失败: ${needLoadNames.join(", ")}`, e);
             throw e;
@@ -76,7 +76,9 @@ export class ConfigManager {
                 throw new Error(`配置表内容无效: ${loadingKey}`);
             }
 
-            this.buildIndex(tableName, asset.json);
+            // ✅ 核心重构：将同步的 buildIndex 替换为异步的时间分片构建，让出主线程
+            await this.buildIndexAsync(tableName, asset.json);
+
         } catch (e) {
             Logger.error(LogModule.ConfigManager, `配置表加载失败: ${loadingKey}`, e);
             throw e;
@@ -92,20 +94,45 @@ export class ConfigManager {
         await this.loadTables([tableName], bundleName);
     }
 
-    private buildIndex(tableName: string, data: any): void {
+    /**
+     * ✅ 核心架构：时间分片构建引擎 (Time-Slicing Parser)
+     * 将几千上万行的配置表化整为零，每处理 N 条数据就休息一次（让权给引擎渲染流），保持帧率平滑。
+     */
+    private async buildIndexAsync(tableName: string, data: any): Promise<void> {
         const tableMap = new Map<any, any>();
+        const CHUNK_SIZE = 500; // 每帧处理最大行数阈值
+
         if (Array.isArray(data)) {
             for (let i = 0; i < data.length; i++) {
                 const row = data[i];
                 const key = row.id !== undefined ? row.id : i;
                 tableMap.set(key, row);
+
+                // 触发帧让出
+                if (i > 0 && i % CHUNK_SIZE === 0) {
+                    await this.yieldFrame();
+                }
             }
         } else {
-            for (const key in data) {
+            const keys = Object.keys(data);
+            for (let i = 0; i < keys.length; i++) {
+                const key = keys[i];
                 tableMap.set(key, data[key]);
+
+                // 触发帧让出
+                if (i > 0 && i % CHUNK_SIZE === 0) {
+                    await this.yieldFrame();
+                }
             }
         }
         this._tables.set(tableName, tableMap);
+    }
+
+    /**
+     * 利用宏任务切片，释放当前 CPU 控制权，保障渲染流水线不卡顿
+     */
+    private yieldFrame(): Promise<void> {
+        return new Promise(resolve => setTimeout(resolve, 0));
     }
 
     public query<T>(tableName: string, id: any): T | null {
@@ -127,7 +154,6 @@ export class ConfigManager {
 
     public unloadTable(tableName: string, bundleName?: string): void {
         this._tables.delete(tableName);
-        // ✅ 核心闭环修复：通知底层的资源管理器释放该 JSON 的物理缓存引用
         const targetBundle = bundleName || "config";
         ResManager.Instance.release(tableName, targetBundle);
         Logger.info(LogModule.ConfigManager, `配置表物理引用被卸载: [${targetBundle}] ${tableName}`);

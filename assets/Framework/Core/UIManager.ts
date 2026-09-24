@@ -2,7 +2,8 @@
  * @module UIManager
  * @description
  * [模块逻辑]
- * 游戏唯一的 UI 管线编排者。处理 UI 栈队列、Promise 阻断防并发、与 Prefab 的自动化加载和缓存映射。
+ * 游戏唯一的 UI 管线编排者。本次重构（Priority 5）为 3D/2D 相机分离架构做好了根基铺垫，并彻底修正了 ResType 的语义一致性。
+ * 强制剥离了 UI 节点与 3D 渲染层的混合（统一设置 Layers.Enum.UI_2D），为流式加载 3D 战斗场景时大厅 UI 不卡顿提供了核心保障。
  *
  * [调用规则]
  * 1. 禁用任何非标准途径的挂载 UI。必须通过 openUI / openDialog 获取实例。
@@ -13,7 +14,7 @@ import { _decorator, Node, Prefab, instantiate, find, UITransform, UIOpacity, Bl
 import { UIBase } from "../Components/UIBase";
 import { ResManager, ResType } from "./ResManager";
 import { UIPool } from "../Components/UIPool";
-import { Logger } from "db://assets/Framework/Core/Logger";
+import { Logger, LogModule } from "db://assets/Framework/Core/Logger";
 
 const { ccclass } = _decorator;
 
@@ -58,9 +59,15 @@ export class UIManager {
     ]);
 
     public init(): void {
-        Logger.info("UIManager 初始化");
+        Logger.info(LogModule.UI_MANAGER, "UIManager 初始化 (UI 层与 CameraSystem 隔离铺平)");
+
+        // ✅ 渲染层隔离铺垫：强制约束 UIManager 只向名为 "Canvas" 的专属 2D 画布下挂载
+        // 在未来的多相机架构中，这块 Canvas 将专属绑定给 UICamera，完全剥离 3D MainCamera。
         this._root = find("Canvas");
-        if (!this._root) { console.error("Canvas 未找到！"); return; }
+        if (!this._root) {
+            Logger.error(LogModule.UI_MANAGER, "致命错误：未找到 2D 正交画布 'Canvas'！");
+            return;
+        }
 
         this.createLayer(UILayer.Scene);
         this.createLayer(UILayer.Window);
@@ -104,7 +111,7 @@ export class UIManager {
         if (!next) return;
 
         this._isOpeningPopup = true;
-        Logger.info("📤 显示Popup:", next.uiName);
+        Logger.info(LogModule.UI_MANAGER, "📤 显示 Popup:", next.uiName);
 
         this._openUIInternalAsync(
             next.uiName, next.path, next.layer, next.data, next.bundleName,
@@ -215,15 +222,13 @@ export class UIManager {
 
     public closeUI(uiName: string): void {
         if (this._isOpeningPopup) return;
-        Logger.info("UI关闭:", uiName);
+        Logger.info(LogModule.UI_MANAGER, "UI关闭:", uiName);
         const ui = this._uiMap.get(uiName);
         if (!ui) return;
 
         ui.onHide();
 
-        // ✅ 核心闭环修复：强制显卡剥离。
-        // 即便是挂了 KeepAlive 白名单的商城和菜单，只要离开屏幕视野（Close），
-        // 它们必须交出其动态加载的高清图集或大尺寸资源的租约！这直接决定了低端机的存亡。
+        // 强行收回该 UI 周期内借用的显存图集等庞大资产
         ui.releaseTrackedAssets();
 
         const config = this._uiCacheConfig.get(uiName);
@@ -256,6 +261,7 @@ export class UIManager {
         const ui = this._uiMap.get(uiName);
         if (!ui) return;
 
+        // ✅ 核心联动：触发 UIBase 内部的 Sandbox 熔断销毁机制
         ui.onDestroyUI();
 
         if (ui.node && ui.node.isValid) ui.node.destroy();
@@ -285,10 +291,11 @@ export class UIManager {
     public async preloadUI(uiName: string, path: string): Promise<void> {
         try {
             const config = this._uiCacheConfig.get(uiName);
-            const resType = config?.keepAlive ? ResType.PERMANENT : ResType.NORMAL;
+            // ✅ 对齐全局语义：彻底将错误的 PERMANENT 修正为 EXPLICIT
+            const resType = config?.keepAlive ? ResType.EXPLICIT : ResType.NORMAL;
             await ResManager.Instance.load<Prefab>(path, Prefab, undefined, resType);
         } catch (err) {
-            console.error("❌ 预加载失败:", uiName, path, err);
+            Logger.error(LogModule.UI_MANAGER, "❌ 预加载失败:", uiName, path, err);
         }
     }
 
@@ -302,7 +309,11 @@ export class UIManager {
 
     private createLayer(layer: UILayer): void {
         const node = new Node(layer);
+
+        // ✅ 渲染层核心隔离：强制标记所有 UI 层级的渲染掩码为 UI_2D
+        // 这样在 Cocos 编辑器中，3D 主相机可以轻易过滤掉这些 UI，不再发生 3D 穿透或透视畸变
         node.layer = Layers.Enum.UI_2D;
+
         const transform = node.addComponent(UITransform);
         const canvasTransform = this._root.getComponent(UITransform);
         if (canvasTransform) transform.setContentSize(canvasTransform.contentSize);
@@ -312,16 +323,17 @@ export class UIManager {
 
     private async _loadPrefab(uiName: string, path: string, bundleName?: string): Promise<Prefab> {
         const config = this._uiCacheConfig.get(uiName);
-        const resType = config?.keepAlive ? ResType.PERMANENT : ResType.NORMAL;
+        // ✅ 对齐全局语义：彻底修正为 EXPLICIT
+        const resType = config?.keepAlive ? ResType.EXPLICIT : ResType.NORMAL;
         try {
             const prefab = await ResManager.Instance.load<Prefab>(path, Prefab, bundleName, resType);
             if (!prefab) {
-                Logger.error(`[UIManager] 无法加载 Prefab: ${path}`);
+                Logger.error(LogModule.UI_MANAGER, `[UIManager] 无法加载 Prefab: ${path}`);
                 return null;
             }
             return prefab;
         } catch (err) {
-            Logger.error(`[UIManager] 加载 UI Prefab 异常: ${uiName}`, err);
+            Logger.error(LogModule.UI_MANAGER, `[UIManager] 加载 UI Prefab 异常: ${uiName}`, err);
             return null;
         }
     }
@@ -329,6 +341,10 @@ export class UIManager {
     private _getOrCreateMask(): Node {
         if (this._maskNode) return this._maskNode;
         const mask = new Node("UIMask");
+
+        // ✅ 渲染层核心隔离：连遮罩也必须强制归属于 2D 管线
+        mask.layer = Layers.Enum.UI_2D;
+
         const trans = mask.addComponent(UITransform);
         trans.setContentSize(750, 1334);
         const opacity = mask.addComponent(UIOpacity);

@@ -147,7 +147,7 @@ export class TimerManager {
     public remove(id: number): void {
         const task = this._tasks.find(t => t.id === id);
         if (task) task.isFinished = true;
-    }
+    }7
 
     public removeByTarget(target: any): void {
         this._tasks.forEach(task => { if (task.target === target) task.isFinished = true; });

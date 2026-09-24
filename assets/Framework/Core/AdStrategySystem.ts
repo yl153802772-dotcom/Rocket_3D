@@ -1,4 +1,10 @@
-﻿// assets/Framework/Core/AdStrategySystem.ts
+﻿/**
+ * @module AdStrategySystem
+ * @description
+ * [模块逻辑]
+ * 业务层广告策略系统。封装点位映射与观看次数上限。
+ * 完全符合跨平台抽象准则，直接调用 AdManager 业务侧接口，无平台耦合。
+ */
 
 import { AdManager } from "../../Framework/Core/AdManager";
 import { SaveManager } from "../../Framework/Core/SaveManager";
@@ -29,7 +35,6 @@ export class AdStrategySystem {
             SaveManager.Instance.set(DataKey.DAILY_AD_COUNT, 0);
             return 0;
         }
-
         return SaveManager.Instance.get<number>(DataKey.DAILY_AD_COUNT, 0);
     }
 
@@ -40,30 +45,15 @@ export class AdStrategySystem {
     private recordAdShown(placement: AdPlacement | string): void {
         const count = this.getTodayAdCount();
         SaveManager.Instance.set(DataKey.DAILY_AD_COUNT, count + 1);
-        Logger.info(LogModule.AdManager, `📝 广告播放成功入账 [${placement}]，今日累计: ${count + 1}/${this._maxPerDay}`);
+        Logger.info(LogModule.APP, `📝 广告播放成功入账 [${placement}]，今日累计: ${count + 1}/${this._maxPerDay}`);
     }
 
-    /**
-     * 🌟 业务点位播放主入口
-     */
     public async tryShowRewardAdAsync(placement: AdPlacement = AdPlacement.BATTLE_REVIVE): Promise<boolean> {
-       /* if (!this.canShowRewardAd()) {
-            Logger.warn(LogModule.AdManager, "今日观看广告次数已达上限");
-            return false;
-        }*/
-
-        // 🌟 1. 防御：检查点位配置
         const adUnitId = AD_UNIT_MAP[placement] || placement;
-        Logger.info(LogModule.AdManager, `🎬 正在唤起点位 [${placement}], adUnitId: ${adUnitId}`);
+        Logger.info(LogModule.APP, `🎬 正在唤起点位 [${placement}], adUnitId: ${adUnitId}`);
 
-        // 🌟 2. 调起底层广告
         const success = await AdManager.Instance.showRewardAdAsync(adUnitId);
-
-        Logger.info(LogModule.AdManager, `🎬 点位 [${placement}] 广告播放返回结果: ${success}`);
-
-        if (success) {
-            this.recordAdShown(placement);
-        }
+        if (success) this.recordAdShown(placement);
         return success;
     }
 
@@ -71,7 +61,6 @@ export class AdStrategySystem {
         const isTimeProtected = (Date.now() - this._gameStartTime) < 60000;
         const currentWave = DataCenter.Instance.get(DataKey.CUR_WAVE_INDEX) as number || 0;
         const isWaveProtected = currentWave < 1;
-
         return isTimeProtected || isWaveProtected;
     }
 }

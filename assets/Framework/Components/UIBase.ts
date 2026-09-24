@@ -2,20 +2,20 @@
  * @module UIBase
  * @description
  * [模块逻辑]
- * 核心 UI 基类。封装了 UI 的开关动画、安全回调追踪，以及最核心的 资源/事件/定时器 自动清理机制。
- * 引入 ResourceLoadScope 控制异步资源的声明周期，根治了 UI 关闭后请求才返回导致的内存悬空泄漏。
+ * 核心 UI 基类。本次重构（Priority 5）全面升级了【零泄漏生命周期沙箱 (Lifecycle Scope)】。
+ * 废弃了手动追踪数组的旧做法，引入了原生的 Set 沙箱机制。UI 销毁时，所有资源请求、事件监听、数据订阅和定时器将被沙箱一键物理熔断。
  *
  * [调用规则]
- * 1. UI 类必须继承此基类。动态加载内部资源必须使用 this.loadAsset()，不要直接调 ResManager，以保证作用域安全。
- * 2. 非常驻 UI 关闭时自动触发 onDestroyUI 释放资源；常驻 UI (KeepAlive) 深度隐藏时可由 UIManager 手动触发 releaseTrackedAssets 剥离显存。
+ * 1. 业务端在 onShow 中无脑调用 listenEvent 和 watchData 即可，绝对不需要手动 off/unwatch。
+ * 2. 动态加载内部资源必须使用 this.loadAsset()，不要直接调 ResManager，以保证作用域安全。
  */
 
 import { _decorator, Component, Node, tween, Vec3, UIOpacity, Tween, Asset } from 'cc';
 import { EventCenter } from '../Data/EventCenter';
 import { DataCenter } from '../Data/DataCenter';
-import { ResManager, ResourceLoadScope, ResType } from '../Core/ResManager'; // ✅ 导入 Scope
+import { ResManager, ResourceLoadScope, ResType } from '../Core/ResManager';
 import { Logger, LogModule } from '../Core/Logger';
-import { EventName, EventPayloadMap, DataKey, DataPayloadMap } from "../Core/GameConst";
+import { EventPayloadMap, DataPayloadMap } from "../Core/GameConst";
 import { TimerGroup, TimerManager } from '../Core/TimerTool/TimerManager';
 
 const { ccclass } = _decorator;
@@ -28,12 +28,12 @@ export class UIBase extends Component {
 
     protected _closeResolve: (value: any) => void = null;
 
+    // ✅ 重构：废除易错的 Array 追踪，改用大厂沙箱集 (Sandbox Sets) 确保引用唯一且极速擦除
     private _trackedAssets: { path: string, bundleName?: string }[] = [];
-    private _trackedEvents: { eventName: string, callback: any }[] = [];
-    private _trackedData: { key: string, callback: any }[] = [];
-    private _assetRevision: number = 0;
+    private _eventSandbox: Set<{ eventName: string, callback: any }> = new Set();
+    private _dataSandbox: Set<{ key: string, callback: any }> = new Set();
 
-    // ✅ 核心闭环修复：引入 UI 级的请求护盾，自动静默废弃迟到的资源回调
+    private _assetRevision: number = 0;
     private _uiScope: ResourceLoadScope = null;
 
     private _onCloseSelfCallback: ((resultData?: any) => void) | null = null;
@@ -44,7 +44,6 @@ export class UIBase extends Component {
 
     public onInit(): void {
         this._opacity = this.getComponent(UIOpacity) || this.addComponent(UIOpacity);
-        // 初始化专属作用域护盾
         this._uiScope = new ResourceLoadScope(`UI_${this.node.name}_${this._assetRevision}`);
     }
 
@@ -66,28 +65,20 @@ export class UIBase extends Component {
 
     public setCloseResolve(resolve: (value: any) => void) {
         if (this._closeResolve) {
-            Logger.warn(`[UIBase] ${this.node.name} 已有 closeResolve，新的会被忽略`);
+            Logger.warn(LogModule.UIBase, `[UIBase] ${this.node.name} 已有 closeResolve，新的会被忽略`);
             return;
         }
         this._closeResolve = resolve;
     }
 
-    // ✅ 核心闭环修复：基于 Scope 的受控异步加载
     public async loadAsset<T extends Asset>(path: string, type: any, bundleName?: string): Promise<T> {
         if (!this._uiScope) {
             this._uiScope = new ResourceLoadScope(`UI_${this.node.name}_${this._assetRevision}`);
         }
 
         const requestRevision = this._assetRevision;
-
-        // 把当前 UI 的护盾传递到底层资源管理器
         const asset = await ResManager.Instance.load<T>(
-            path,
-            type,
-            bundleName,
-            ResType.NORMAL,
-            undefined,
-            this._uiScope
+            path, type, bundleName, ResType.NORMAL, undefined, this._uiScope
         );
 
         if (asset) {
@@ -100,14 +91,9 @@ export class UIBase extends Component {
         return asset;
     }
 
-    /**
-     * 归还原 UI 生命周期内通过 loadAsset 获取的引用。
-     * 常驻 UI 被隐藏、非常驻 UI 被销毁进入对象池前，必须调用。
-     */
     public releaseTrackedAssets(): void {
         this._assetRevision++;
 
-        // 废除当前的加载护盾，任何正在路上还未回来的下载请求都会被无声抛弃！
         if (this._uiScope) {
             this._uiScope.invalidate();
             this._uiScope = new ResourceLoadScope(`UI_${this.node.name}_${this._assetRevision}`);
@@ -118,29 +104,40 @@ export class UIBase extends Component {
         assets.forEach(item => ResManager.Instance.release(item.path, item.bundleName));
     }
 
+    // ✅ 沙箱级追踪：事件注册
     public listenEvent<K extends keyof EventPayloadMap>(eventName: K, callback: (data: EventPayloadMap[K]) => void): void {
         EventCenter.on(eventName, callback);
-        this._trackedEvents.push({ eventName: eventName as string, callback });
+        this._eventSandbox.add({ eventName: eventName as string, callback });
     }
 
+    // ✅ 沙箱级追踪：数据注册
     public watchData<K extends keyof DataPayloadMap>(key: K, callback: (newValue: DataPayloadMap[K], oldValue: DataPayloadMap[K]) => void): void {
         DataCenter.Instance.watch(key, callback);
-        this._trackedData.push({ key: key as string, callback });
+        this._dataSandbox.add({ key: key as string, callback });
     }
 
+    /**
+     * ✅ 沙箱销毁中枢 (Sandbox Dispose)
+     */
     public onDestroyUI(): void {
-        Logger.info(LogModule.UIBase, `销毁 UI，执行自动清理: ${this.node.name}`);
+        Logger.info(LogModule.UIBase, `[Sandbox] 熔断 UI 生命周期沙箱: ${this.node.name}`);
 
-        this._trackedEvents.forEach(item => EventCenter.off(item.eventName as any, item.callback));
-        this._trackedEvents.length = 0;
+        // 1. 物理熔断所有 EventCenter 订阅
+        this._eventSandbox.forEach(item => {
+            EventCenter.off(item.eventName as any, item.callback);
+        });
+        this._eventSandbox.clear();
 
-        this._trackedData.forEach(item => {
+        // 2. 物理熔断所有 DataCenter 订阅
+        this._dataSandbox.forEach(item => {
             DataCenter.Instance.unwatch(item.key as keyof DataPayloadMap, item.callback);
         });
-        this._trackedData.length = 0;
+        this._dataSandbox.clear();
 
+        // 3. 熔断异步网络加载护盾并归还显存
         this.releaseTrackedAssets();
 
+        // 4. 熔断表现层心跳
         Tween.stopAllByTarget(this.node);
         if (this._opacity) Tween.stopAllByTarget(this._opacity);
         TimerManager.Instance.removeByTarget(this);

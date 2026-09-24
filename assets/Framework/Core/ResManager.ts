@@ -3,14 +3,15 @@
  * @description
  * [模块逻辑]
  * 统一的异步资源调度中枢。基于引用计数、受控 LRU 与 ResourceLoadScope 提供内存安全。
- * 本次重构已将 2D 专用的图集帧缓存抽象为内部独立服务 AtlasFrameCacheService，从而使主干代码能够兼容 3D (Mesh/Material) 的纯粹 Asset 管理逻辑。
+ * 本次重构（Priority 3）引入了针对 3D/重度游戏的大厂级机制：【基于显存权重的 VRAM-LRU】。
+ * 彻底废除了“基于数量（个数）淘汰”的简易做法，改为硬性限制显存容量（默认 100MB）。
  *
  * [调用规则]
  * 1. 废弃 PERMANENT 命名，改用 ResType.EXPLICIT。它代表“引用归零时立即释放”，而非“永不释放”；长驻内存必须由业务持续持有引用。
- * 2. 禁止在业务端使用 setTimeout 延迟释放资源，所有异步请求必须绑定 Scope，并在场景切出时 invalidate()。
+ * 2. 严禁修改 AssetMemoryHelper 估算参数，大尺寸 3D 贴图与 Mesh 归还后将比普通配置表更早触发显存阈值猎杀。
  */
 
-import { AssetManager, assetManager, Asset, SpriteAtlas, SpriteFrame } from 'cc';
+import { AssetManager, assetManager, Asset, SpriteAtlas, SpriteFrame, Texture2D, Mesh, AudioClip, JsonAsset } from 'cc';
 import { Logger, LogModule } from './Logger';
 import { BundleManager, BundleLoadAbandonedError } from './BundleManager';
 import { EventCenter } from "../../Framework/Data/EventCenter";
@@ -114,6 +115,41 @@ class AtlasFrameCacheService {
     public get size(): number { return this._frameCache.size; }
 }
 
+// ✅ 显存防爆器：实时计算各类 2D/3D 资产真实的 Byte 重量
+class AssetMemoryHelper {
+    public static estimateAssetMemory(asset: Asset): number {
+        if (!asset) return 0;
+        try {
+            // 3D/2D 贴图估算 (RGBA8 位深 4Byte + 1.33 Mipmaps 开销)
+            if (asset instanceof Texture2D) {
+                return asset.width * asset.height * 4 * 1.33;
+            }
+            // 散图估算
+            if (asset instanceof SpriteFrame) {
+                const rect = asset.rect;
+                return rect ? rect.width * rect.height * 4 : 1024 * 50;
+            }
+            // 3D 几何网格估算 (顶点/法线/UV等 Buffer)
+            if (asset instanceof Mesh) {
+                // Cocos 的 _data 在不同版本有差异，这里采用安全均值预估法：每个子模型约 1MB
+                return 1024 * 1024 * 1;
+            }
+            // 音频流缓冲估算 (100KB/s)
+            if (asset instanceof AudioClip) {
+                return (asset.getDuration() || 1) * 1024 * 100;
+            }
+            // JSON 等纯文本表
+            if (asset instanceof JsonAsset) {
+                return asset.json ? JSON.stringify(asset.json).length : 1024;
+            }
+        } catch (e) {
+            // 屏蔽引擎底层内部错误
+        }
+        // 兜底 50KB
+        return 1024 * 50;
+    }
+}
+
 export class ResManager {
     private static _instance: ResManager;
     public static get Instance(): ResManager {
@@ -125,18 +161,21 @@ export class ResManager {
     private _loadingMap = new Map<string, ILoadingResourceEntry>();
     private _assetMap = new Map<string, Asset>();
     private _resTypeMap = new Map<string, ResType>();
-    private _lruCache = new Map<string, { asset: Asset; lastAccessTime: number }>();
+
+    // ✅ 升级：LRU 增加显存权重记录 (size)
+    private _lruCache = new Map<string, { asset: Asset; lastAccessTime: number, size: number }>();
     private _bundleLeases = new Map<string, Map<string, IBundleLeaseEntry>>();
     private _pendingBundleReleases = new Map<string, boolean>();
 
-    // 2D 专属缓存服务
+    // ✅ 升级：物理内存总账本与 100MB 的淘汰红线
+    private _currentLRUMemory: number = 0;
+    private readonly MAX_LRU_MEMORY: number = 100 * 1024 * 1024; // 100MB 显存红线
+    private readonly LRU_EXPIRE_TIME = 5 * 60 * 1000; // 5分钟冷宫保底时间
+
     private _atlasCacheService = new AtlasFrameCacheService();
 
-    private readonly MAX_LRU_COUNT = 30;
-    private readonly LRU_EXPIRE_TIME = 5 * 60 * 1000;
-
     public init(): void {
-        Logger.info(LogModule.RES_MANAGER, "ResManager 最终版初始化完成 (2D/3D解耦架构)");
+        Logger.info(LogModule.RES_MANAGER, "ResManager 最终版初始化完成 (显存级 VRAM-LRU 管线)");
         EventCenter.on("CORE_BUNDLE_RELEASED" as any, (bundleName: string) => {
             this.clearAssetsByBundle(bundleName);
         });
@@ -146,7 +185,7 @@ export class ResManager {
         return bundleName ? `${bundleName}/${path}` : path;
     }
 
-    // ==================== Bundle 管理 (略作删减保留核心) ====================
+    // ==================== Bundle 管理 ====================
     public async loadBundle(bundleName: string, lease?: IBundleLeaseOptions): Promise<AssetManager.Bundle> {
         if (lease?.requestScope && !lease.requestScope.isActive) throw new ResourceLoadAbandonedError(bundleName);
 
@@ -237,6 +276,11 @@ export class ResManager {
         if (resType === ResType.NORMAL && this._lruCache.has(key)) {
             const item = this._lruCache.get(key)!;
             this._lruCache.delete(key);
+
+            // ✅ 从 LRU 中重新激活，账本扣除冻结内存
+            this._currentLRUMemory -= item.size;
+            if (this._currentLRUMemory < 0) this._currentLRUMemory = 0;
+
             if (item.asset && item.asset.isValid) {
                 item.lastAccessTime = Date.now();
                 this._assetMap.set(key, item.asset);
@@ -342,7 +386,13 @@ export class ResManager {
 
             if (asset.isValid) {
                 asset.addRef();
-                this._lruCache.set(key, { asset, lastAccessTime: Date.now() });
+
+                // ✅ 冻结到 LRU 时，评估该资产的显存占用并记账
+                const size = AssetMemoryHelper.estimateAssetMemory(asset);
+                this._lruCache.set(key, { asset, lastAccessTime: Date.now(), size });
+                this._currentLRUMemory += size;
+
+                // 进行内存高水位线审查
                 this.checkLRUCapacity();
             } else {
                 assetManager.releaseAsset(asset);
@@ -351,13 +401,26 @@ export class ResManager {
         }
     }
 
+    // ✅ 核心重构：显存防爆清理器
     private checkLRUCapacity(): void {
-        if (this._lruCache.size <= this.MAX_LRU_COUNT) return;
-        let oldestKey = ""; let oldestTime = Number.MAX_VALUE;
-        this._lruCache.forEach((item, key) => {
-            if (item.lastAccessTime < oldestTime) { oldestTime = item.lastAccessTime; oldestKey = key; }
-        });
-        if (oldestKey) this.realRelease(oldestKey);
+        // 当冻结的内存超过阈值 (100MB) 并且池内有存货时，不断猎杀最老资源
+        while (this._currentLRUMemory > this.MAX_LRU_MEMORY && this._lruCache.size > 0) {
+            let oldestKey = "";
+            let oldestTime = Number.MAX_VALUE;
+
+            this._lruCache.forEach((item, key) => {
+                if (item.lastAccessTime < oldestTime) {
+                    oldestTime = item.lastAccessTime;
+                    oldestKey = key;
+                }
+            });
+
+            if (oldestKey) {
+                this.realRelease(oldestKey);
+            } else {
+                break;
+            }
+        }
     }
 
     public clearExpiredLRU(): void {
@@ -369,14 +432,20 @@ export class ResManager {
         expired.forEach(key => this.realRelease(key));
     }
 
+    // ✅ 物理擦除并平账
     private realRelease(key: string): void {
         const item = this._lruCache.get(key);
         if (item) {
+            // 平账：扣减显存水位
+            this._currentLRUMemory -= item.size;
+            if (this._currentLRUMemory < 0) this._currentLRUMemory = 0;
+
             if (item.asset && item.asset.isValid) {
                 this._atlasCacheService.clearByAtlas(key);
                 try { assetManager.releaseAsset(item.asset); } catch(e){}
             }
             this._lruCache.delete(key);
+            Logger.debug(LogModule.RES_MANAGER, `[LRU 显存卸载] 释放 ${(item.size / 1024).toFixed(2)} KB, 剩余缓存水位: ${(this._currentLRUMemory / 1024 / 1024).toFixed(2)} MB`);
         }
     }
 
@@ -445,6 +514,7 @@ export class ResManager {
         Logger.info(LogModule.RES_MANAGER, "[ResManager] 已执行 releaseUnusedAssets 兜底清理");
     }
 
+    // ✅ 修复：按 Bundle 清除时走真卸载逻辑，平账显存
     public clearAssetsByBundle(bundleName: string, force: boolean = false): void {
         const prefix = `${bundleName}/`;
         for (const [key, asset] of this._assetMap.entries()) {
@@ -456,13 +526,24 @@ export class ResManager {
                 }
             }
         }
-        for (const [key, item] of this._lruCache.entries()) {
+
+        for (const key of Array.from(this._lruCache.keys())) {
             if (key.startsWith(prefix)) {
-                if (item.asset && item.asset.isValid) assetManager.releaseAsset(item.asset);
-                this._lruCache.delete(key);
+                this.realRelease(key);
             }
         }
         this._atlasCacheService.clearByPrefix(prefix);
+    }
+
+    // ==================== Debug 面板注入 ====================
+    public getDebugInfo(): any {
+        return {
+            active: this._assetMap.size,
+            lru: this._lruCache.size,
+            lruMemoryMB: (this._currentLRUMemory / 1024 / 1024).toFixed(2) + " MB",
+            loading: this._loadingMap.size,
+            bundles: this._bundleMap.size
+        };
     }
 
     // (其余 Bundle 重试与判定逻辑保持原有稳定实现)
