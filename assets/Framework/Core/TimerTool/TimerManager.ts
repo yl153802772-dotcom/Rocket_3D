@@ -3,14 +3,16 @@
  * @description
  * [模块逻辑]
  * 游戏级多通道定时器系统。提供支持时间缩放（TimeScale）与频道隔离（TimerGroup）的零GC定时器池。
+ * 本次重构接入了 ILifecycleModule 契约，由 ModuleSystem 统一驱动，不再由业务层野蛮调配。
  *
  * [调用规则]
- * 1. 业务端调用 doOnce/doLoop 时，必须根据使用场景传入对应的 TimerGroup（如 UI 倒计时使用 UI 频道，怪物生成使用 BATTLE 频道）。
+ * 1. 业务端调用 doOnce/doLoop 时，必须根据使用场景传入对应的 TimerGroup。
  * 2. 避免直接对 Target 执行全局暴力的 stopAll，业务组件销毁时调用 removeByTarget(this) 安全剥离。
  */
 
 import { isValid } from 'cc';
 import { Logger, LogModule } from '../Logger';
+import { ILifecycleModule } from '../ModuleSystem';
 
 export enum TimerGroup {
     BATTLE = 0, // 战斗层：受战术暂停与全局倍速影响
@@ -61,26 +63,28 @@ export class TimerTask {
     }
 }
 
-export class TimerManager {
+export class TimerManager implements ILifecycleModule {
     private static _instance: TimerManager;
     public static get Instance(): TimerManager {
         if (!this._instance) this._instance = new TimerManager();
         return this._instance;
     }
 
+    // 核心重构：设定极高优先级，确保时钟推进先于所有战斗模块
+    public readonly priority = 10000;
+
     private _tasks: TimerTask[] = [];
     private _taskPool: TimerTask[] = [];
     private _taskIdCounter: number = 0;
 
     public timeScale: number = 1.0;
-    public isPaused: boolean = false; // 总闸
+    public isPaused: boolean = false;
 
-    // ✅ 频道调度控制
     private _groupPaused: Map<TimerGroup, boolean> = new Map();
     private _groupTimeScales: Map<TimerGroup, number> = new Map();
 
     public init(): void {
-        Logger.info(LogModule.FRAMEWORK, "TimerManager 初始化完成，引入频道调度隔离");
+        Logger.info(LogModule.FRAMEWORK, "TimerManager 初始化完成，接入 ILifecycle 模块化总线");
     }
 
     public setGroupPaused(group: TimerGroup, isPaused: boolean) {
@@ -106,7 +110,6 @@ export class TimerManager {
                 continue;
             }
 
-            // ✅ 独立读取任务所属频道的暂停状态
             const groupPaused = this._groupPaused.get(task.groupId) ?? false;
             if (groupPaused) continue;
 
@@ -147,7 +150,7 @@ export class TimerManager {
     public remove(id: number): void {
         const task = this._tasks.find(t => t.id === id);
         if (task) task.isFinished = true;
-    }7
+    }
 
     public removeByTarget(target: any): void {
         this._tasks.forEach(task => { if (task.target === target) task.isFinished = true; });
@@ -155,5 +158,13 @@ export class TimerManager {
 
     public removeTweensByTarget(target: any): void {
         this._tasks.forEach(task => { if (task.target === target && task.isTween) task.isFinished = true; });
+    }
+
+    public dispose(): void {
+        this._tasks.forEach(t => t.onRecycle());
+        this._tasks = [];
+        this._taskPool = [];
+        this._groupPaused.clear();
+        this._groupTimeScales.clear();
     }
 }

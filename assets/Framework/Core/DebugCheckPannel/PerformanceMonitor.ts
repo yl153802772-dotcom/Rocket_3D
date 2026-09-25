@@ -77,7 +77,7 @@ export class PerformanceMonitor {
         if (now - this._lastWarnTime < this.WARN_INTERVAL) return;
 
         const res = ResManager.Instance.getDebugInfo?.();
-        const pool = GameObjectPool.Instance.getDebugInfo?.();
+        //const pool = GameObjectPool.Instance.getDebugInfo?.();
 
         // ===== FPS检测 =====
         if (this._fps < 30) {
@@ -95,9 +95,9 @@ export class PerformanceMonitor {
         }
 
         // ===== Pool异常 =====
-        if (pool && pool.total > 200) {
-            this.warn("对象池过大（可能未回收）", pool.total);
-        }
+       // if (pool && pool.total > 200) {
+       ///     this.warn("对象池过大（可能未回收）", pool.total);
+       // }
 
         this._lastWarnTime = now;
     }
@@ -179,6 +179,6 @@ export class PerformanceMonitor {
     }
 
     public getPoolInfo() {
-        return GameObjectPool.Instance.getDebugInfo?.() || {};
+        //return GameObjectPool.Instance.getDebugInfo?.() || {};
     }
 }

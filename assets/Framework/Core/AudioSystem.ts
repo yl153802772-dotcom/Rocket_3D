@@ -2,11 +2,12 @@
  * @module AudioSystem
  * @description
  * [模块逻辑]
- * 游戏通用音频中枢。提供分类独立音量控制、混音器增益与弱网 BGM 切换防护。
+ * 游戏通用音频中枢。本次重构（Priority 9）彻底修复了战术暂停与时间缩放下的“槽位假死”问题。
+ * 将音效生命周期回收统一交由 TimerManager 的对应频道 (Group) 管理，并提供了针对 3D/重度游戏切关时的安全熔断机制。
  *
  * [调用规则]
  * 1. UI 音效与战斗音效受到严格分流，DataCenter 的 IS_PAUSED (战术暂停) 绝对不能拦截或挂起 UI 交互音效。
- * 2. 音效槽位的释放必须依据其独立的 Playback Token 及估计时长，不被时间倍速或战术暂停所扭曲。
+ * 2. 音效槽位的释放现已受全局时钟安全保护，切关时 PreloadManager 会自动触发 stopAllBattleAudio()。
  */
 
 import { AudioClip, AudioSource, Node, clamp01, director } from 'cc';
@@ -14,8 +15,9 @@ import { ResManager } from "./ResManager";
 import { SaveManager } from "./SaveManager";
 import { DataKey } from "./GameConst";
 import { Logger, LogModule } from "./Logger";
-import { DataCenter } from "../Data/DataCenter";
+import {DataCenter, RuntimeDataCenter} from "../Data/DataCenter";
 import { AUDIO_BUNDLE, AudioCategory } from './AudioConst';
+import { TimerManager, TimerGroup } from './TimerTool/TimerManager'; // ✅ 接入统一时钟总线
 
 export class AudioSystem {
     private static _instance: AudioSystem = null;
@@ -32,9 +34,9 @@ export class AudioSystem {
     private _sfxUIMap: Map<AudioSource, boolean> = new Map();
     private _sfxClipPathMap: Map<AudioSource, string> = new Map();
 
-    // ✅ 核心防泄漏：基于 Token 验证回收权限
     private _sfxTokenMap: Map<AudioSource, number> = new Map();
-    private _sfxReleaseTimers: Map<AudioSource, ReturnType<typeof setTimeout>> = new Map();
+    // ✅ 重构：废除 setTimeout，改为记录 TimerManager 的任务 ID
+    private _sfxReleaseTimers: Map<AudioSource, number> = new Map();
     private _sfxToken: number = 0;
 
     private _soundOn: boolean = true;
@@ -44,7 +46,6 @@ export class AudioSystem {
     private _lastBGMPath: string = "";
     private _bgmClipPath: string = "";
 
-    // ✅ 核心防泄漏：异步 BGM 加载护盾
     private _bgmRequestToken: number = 0;
     private _rootNode: Node = null;
 
@@ -55,7 +56,7 @@ export class AudioSystem {
     private _sfxBaseGainMap: Map<string, number> = new Map();
 
     public init(): void {
-        Logger.info(LogModule.AUDIO, "AudioSystem 初始化");
+        Logger.info(LogModule.AUDIO, "AudioSystem 初始化 (接入时钟总线与熔断管线)");
         this._rootNode = new Node("AudioSystem");
         director.addPersistRootNode(this._rootNode);
 
@@ -72,8 +73,8 @@ export class AudioSystem {
         this._soundOn = SaveManager.Instance.get(DataKey.IS_MUSIC_ON, true);
         this._bgmOn = SaveManager.Instance.get(DataKey.SETTING_BGM, true);
 
-        // ✅ 架构净化：监听战术暂停，严格保护 UI 音效不被误杀
-        DataCenter.Instance.watch(DataKey.IS_PAUSED, (isPaused: boolean) => {
+        // ✅ 同步重构：监听纯内存的战术暂停，严格保护 UI 音效不被误杀，并且不引起脏标记落盘
+        RuntimeDataCenter.Instance.watch(DataKey.IS_PAUSED, (isPaused: boolean) => {
             this._sfxPool.forEach(sfx => {
                 if (this._sfxBusyMap.get(sfx) && sfx.playing && !this._sfxUIMap.get(sfx)) {
                     if (isPaused) sfx.pause();
@@ -88,14 +89,12 @@ export class AudioSystem {
         this._currentBGM = path;
         this._lastBGMPath = path;
 
-        // 颁发全新的异步请求令牌
         const requestToken = ++this._bgmRequestToken;
 
         try {
             this.releaseBGMClip();
             const clip = await ResManager.Instance.load<AudioClip>(path, AudioClip, AUDIO_BUNDLE);
 
-            // ✅ 拦截：如果在加载期间玩家切了场景或关闭了音效，废弃本次结果
             if (requestToken !== this._bgmRequestToken || !this._bgmOn || this._currentBGM !== path || !clip || !clip.isValid) {
                 if (clip) ResManager.Instance.release(path, AUDIO_BUNDLE);
                 return;
@@ -128,18 +127,21 @@ export class AudioSystem {
     }
 
     public stopBGM(): void {
-        this._bgmRequestToken++; // 失效旧异步请求
+        this._bgmRequestToken++;
         this.releaseBGMClip();
         this._currentBGM = "";
     }
 
     private releaseSfxSource(source: AudioSource): void {
         if (!source) return;
-        const releaseTimer = this._sfxReleaseTimers.get(source);
-        if (releaseTimer !== undefined) {
-            clearTimeout(releaseTimer);
+
+        // ✅ 核心修复：通过 TimerManager 精准移除定时器，不再受到 JS 原生 EventLoop 干扰
+        const timerId = this._sfxReleaseTimers.get(source);
+        if (timerId !== undefined) {
+            TimerManager.Instance.remove(timerId);
             this._sfxReleaseTimers.delete(source);
         }
+
         source.stop();
         source.clip = null;
 
@@ -189,7 +191,6 @@ export class AudioSystem {
 
             this.releaseSfxSource(idleSource);
 
-            // 颁发音效坑位令牌
             const playbackToken = ++this._sfxToken;
             this._sfxBusyMap.set(idleSource, true);
             this._sfxUIMap.set(idleSource, isUI);
@@ -202,13 +203,17 @@ export class AudioSystem {
                 idleSource.play();
             }
 
-            // 使用真实墙钟时间释放槽位，确保战术暂停期间槽位不会被永久卡死
             const estimatedDuration = clip.getDuration() || 1.0;
-            const releaseTimer = setTimeout(() => {
+
+            // ✅ 核心防漏与时钟对齐：将释放周期交由全局时钟管理
+            // 战术暂停和 TimeScale 变化会自动拉长或缩短这个回收定时器，彻底告别旧版 setTimeout 造成的槽位早泄假死
+            const groupId = isUI ? TimerGroup.UI : TimerGroup.BATTLE;
+            const timerId = TimerManager.Instance.doOnce((estimatedDuration + 0.1), () => {
                 if (this._sfxTokenMap.get(idleSource!) !== playbackToken) return;
                 this.releaseSfxSource(idleSource!);
-            }, (estimatedDuration + 0.1) * 1000);
-            this._sfxReleaseTimers.set(idleSource, releaseTimer);
+            }, this, groupId);
+
+            this._sfxReleaseTimers.set(idleSource, timerId);
 
         } catch (e) {
             Logger.error(LogModule.AUDIO, "音效加载失败", path);
@@ -237,6 +242,16 @@ export class AudioSystem {
                 if (this._sfxUIMap.get(s)) this.releaseSfxSource(s);
             });
         }
+    }
+
+    // ✅ 新增接口：提供给 PreloadManager 场景切换时的强制资源熔断器
+    public stopAllBattleAudio(): void {
+        Logger.info(LogModule.AUDIO, "🛑 主动熔断所有战斗音效，归还资源租约");
+        this._sfxPool.forEach(sfx => {
+            if (this._sfxBusyMap.get(sfx) && !this._sfxUIMap.get(sfx)) {
+                this.releaseSfxSource(sfx);
+            }
+        });
     }
 
     public stopAllSfx(): void {

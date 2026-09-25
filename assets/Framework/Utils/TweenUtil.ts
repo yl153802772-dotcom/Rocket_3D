@@ -100,7 +100,7 @@ export class TweenUtil {
      * 场景切换时由框架主动调用
      */
     static stopAll() {
-        TimerManager.Instance.clearAllTweens();
+        //TimerManager.Instance.clearAllTweens();
     }
 
     static onSceneUnload(): void {

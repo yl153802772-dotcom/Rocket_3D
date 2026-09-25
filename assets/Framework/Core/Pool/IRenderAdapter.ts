@@ -11,18 +11,61 @@
  * 2. 严禁在 Adapter 中编写任何游戏业务逻辑（如重置血量），此处仅限处理纯粹的底层组件状态恢复。
  */
 
-import { Node } from 'cc';
+/**
+ * @module IRenderAdapter
+ * @description
+ * 2D/3D 通用渲染适配层。
+ * 将对象池复用时的表现层清理逻辑（材质、刚体、骨骼动画等）与对象池核心调度逻辑解耦。
+ */
+import { Node, Sprite, MeshRenderer, RigidBody, SkeletalAnimation } from 'cc';
 
 export interface IRenderAdapter {
-    /**
-     * 当节点从对象池被取出，且已挂载到父节点、激活 active 后调用。
-     * 推荐操作：清零刚体速度、还原材质实例默认参数、重启粒子系统。
-     */
-    onSpawn?(node: Node): void;
+    /** 节点复用前，洗去残留的材质变体、物理动量与表现层状态 */
+    resetInstance(node: Node): void;
+    /** 节点彻底销毁时，清理深层渲染代理与材质引用 */
+    disposeInstance(node: Node): void;
+}
 
-    /**
-     * 当节点准备被回收到对象池，在从父节点移除前调用。
-     * 推荐操作：强制清空 TrailRenderer 历史轨迹，停止粒子发射。
-     */
-    onRecycle?(node: Node): void;
+export class SpriteRenderAdapter implements IRenderAdapter {
+    public resetInstance(node: Node): void {
+        const sprite = node.getComponent(Sprite);
+        if (sprite) {
+            sprite.customMaterial = null;
+            sprite.color.set(255, 255, 255, 255);
+        }
+    }
+
+    public disposeInstance(node: Node): void {
+        // 2D 节点销毁一般由引擎自动接管底层资源
+    }
+}
+
+export class MeshRenderAdapter implements IRenderAdapter {
+    public resetInstance(node: Node): void {
+        // 1. 重置 3D 物理引擎动量残留，防止复用时怪物瞬间飞出地图
+        const rigidBody = node.getComponent(RigidBody);
+        if (rigidBody) {
+            rigidBody.clearState();
+            rigidBody.clearForces();
+            rigidBody.clearVelocity();
+        }
+
+        // 2. 重置骨骼动画状态
+        const skeleton = node.getComponent(SkeletalAnimation);
+        if (skeleton) {
+            skeleton.stop();
+        }
+
+        // 3. 剥离动态材质实例引用，防止变色/发光状态残留污染下一个复用对象
+        const meshes = node.getComponentsInChildren(MeshRenderer);
+        meshes.forEach(mesh => {
+            // 在实际高阶 3D 业务中，此处应将申请的 MaterialInstance 交还给资源管理器
+            // 此处重置顶点颜色通道作为基础防污染兜底
+            mesh.setInstancedAttribute('a_color', [1, 1, 1, 1]);
+        });
+    }
+
+    public disposeInstance(node: Node): void {
+        // 若业务层动态实例化了 Material，此处需通知 ResManager 释放该材质的动态分配内存
+    }
 }

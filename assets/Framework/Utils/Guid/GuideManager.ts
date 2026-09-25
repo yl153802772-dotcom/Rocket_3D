@@ -4,7 +4,8 @@ import { DataKey, EventPayloadMap } from '../../Core/GameConst';
 import { ConfigManager } from '../../Core/ConfigManager';
 import { UIManager, UILayer } from '../../Core/UIManager';
 import { Logger, LogModule } from '../../Core/Logger';
-import { DataCenter } from '../../Data/DataCenter';
+// ✅ 同步更新：引入拆分后的双数据中心
+import { RuntimeDataCenter, ArchiveDataCenter } from '../../Data/DataCenter';
 
 export class GuideManager {
     private static _instance: GuideManager = null;
@@ -17,14 +18,14 @@ export class GuideManager {
     private _currentGroupId: number = 0;
     private _currentStepId: number = 0;
     private _isGuiding: boolean = false;
-
-    private _delayTimer: any = null; // 记录延迟定时器句柄
+    private _delayTimer: any = null;
 
     public init(): void { }
+
     public registerDynamicFinder(key: string, finder: () => Node): void {
         this._dynamicFinders.set(key, finder);
     }
-    
+
     public startGuideGroup(groupId: number): void {
         if (this._isGuiding) return;
         this._isGuiding = true;
@@ -41,18 +42,13 @@ export class GuideManager {
         if (!config) { this.finishGuideGroup(); return; }
 
         if (config.delay && config.delay > 0) {
-            Logger.info(LogModule.UIBase, `⏱️ 引导延迟触发，等待 ${config.delay} 秒...`);
             this._delayTimer = setTimeout(async () => {
                 this._delayTimer = null;
-
-                // 🌟 架构级防线：如果延迟结束时，玩家处于手动暂停状态（比如打开了设置、暂离），
-                // 引导决不能在暂停态强行弹出遮罩制造死锁！必须挂起等待玩家恢复游戏！
-                while (DataCenter.Instance.get(DataKey.IS_PAUSED)) {
+                // ✅ 暂停态属于运行时状态，调用 RuntimeDataCenter
+                while (RuntimeDataCenter.Instance.get(DataKey.IS_PAUSED)) {
                     await new Promise(res => setTimeout(res, 200));
-                    // 保护机制：如果等待期间引导被强行中止，直接退出
                     if (!this._isGuiding) return;
                 }
-
                 this._performStep(config);
             }, config.delay * 1000);
         } else {
@@ -101,52 +97,47 @@ export class GuideManager {
 
         const shouldPause = config.isPause !== false;
         if (shouldPause) {
-            DataCenter.Instance.addPauseLock("GUIDE_PAUSE");
+            // ✅ 添加暂停锁，调用 RuntimeDataCenter
+            RuntimeDataCenter.Instance.addPauseLock("GUIDE_PAUSE");
         }
 
         const finishEventName = config.finishEvent as keyof EventPayloadMap;
         EventCenter.once(finishEventName, () => {
             if (shouldPause) {
-                DataCenter.Instance.removePauseLock("GUIDE_PAUSE");
+                // ✅ 移除暂停锁，调用 RuntimeDataCenter
+                RuntimeDataCenter.Instance.removePauseLock("GUIDE_PAUSE");
             }
-
-            // 🌟 当前步骤一达成，立刻自毁面罩！屏幕恢复明亮！
             UIManager.Instance.closeUI("GuideUI");
-
             this._currentStepId++;
-            // 延时进入下一步逻辑
             setTimeout(() => { this.executeStep(); }, 100);
         });
     }
 
-    /**
-     * 🌟 引导正常结束：永久置位已完成标记，放行所有系统
-     */
     public finishGuideGroup(): void {
         this._isGuiding = false;
         if (this._delayTimer) {
             clearTimeout(this._delayTimer);
             this._delayTimer = null;
         }
-        DataCenter.Instance.removePauseLock("GUIDE_PAUSE");
+        // ✅ 移除暂停锁，调用 RuntimeDataCenter
+        RuntimeDataCenter.Instance.removePauseLock("GUIDE_PAUSE");
         UIManager.Instance.closeUI("GuideUI");
 
         if (this._currentGroupId === 1) {
-            DataCenter.Instance.set(DataKey.IS_GUIDE_COMPLETED, true);
+            // ✅ 图鉴/引导完成属于需要持久化的资产，严格调用 ArchiveDataCenter
+            ArchiveDataCenter.Instance.set(DataKey.IS_GUIDE_COMPLETED, true);
             Logger.info(LogModule.UIBase, "🎉 新手引导组 1 全部完成，永久解除按键限制！");
         }
     }
 
-    /**
-     * 🌟 强行中断引导：退关、重载时调用
-     */
     public stopAll(): void {
         this._isGuiding = false;
         if (this._delayTimer) {
             clearTimeout(this._delayTimer);
             this._delayTimer = null;
         }
-        DataCenter.Instance.removePauseLock("GUIDE_PAUSE");
+        // ✅ 移除暂停锁，调用 RuntimeDataCenter
+        RuntimeDataCenter.Instance.removePauseLock("GUIDE_PAUSE");
         this._dynamicFinders.clear();
         UIManager.Instance.closeUI("GuideUI");
     }

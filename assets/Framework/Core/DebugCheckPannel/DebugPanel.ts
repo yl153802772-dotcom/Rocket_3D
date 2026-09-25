@@ -33,7 +33,7 @@ export class DebugPanel extends Component {
         this.memLabel.string =
             `Res: ${res.active || 0}\n` +
             `LRU: ${res.lru || 0}\n` +
-            `Pool: ${pool.total || 0}`;
+            `Pool: ${/*pool.total || */0}`;
 
         // ===== 颜色警告 =====
         this.fpsLabel.color = fps < 30 ? Color.RED : Color.WHITE;

@@ -41,12 +41,12 @@ export class I18nLabel extends Component {
     public updateLabel() {
         if (!this.i18nKey || !this._label) return;
 
-        // ... 原来的翻译逻辑保持不变
-        const langTable = ConfigManager.Instance.getConfig("lang");
+        // ✅ 同步更新：使用规范的 query API 提取单行数据
+        const langRow = ConfigManager.Instance.query<any>("lang", this.i18nKey);
         const currentLang = "zh";
 
-        if (langTable && langTable[this.i18nKey]) {
-            this._label.string = langTable[this.i18nKey][currentLang] || this.i18nKey;
+        if (langRow) {
+            this._label.string = langRow[currentLang] || this.i18nKey;
         } else {
             this._label.string = this.i18nKey;
         }

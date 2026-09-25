@@ -2,8 +2,8 @@
  * @module GameEntry
  * @description
  * [模块逻辑]
- * 游戏业务层的总启动节点。本次重构实施了严格的启动域隔离 (Boot Domain Isolation)。
- * 将首屏核心表控制在最少数量，保障 3 秒大厅极速准入；繁重的系统表全部延后至 background 无感加载。
+ * 游戏业务层的总启动节点。
+ * 本次重构消除了原先业务直接驱动时钟的耦合架构。现在 GameEntry 仅负责注册模块，将运行时帧循环完全交由 ModuleSystem 按优先级调度。
  *
  * [调用规则]
  * 1. 禁止向 loadCoreConfigsWithTimeout 添加任何非首屏严格依赖的配置文件。
@@ -12,7 +12,7 @@
 import { _decorator, Component, game, Game } from 'cc';
 import { App } from '../Framework/Core/App';
 import { ConfigManager } from "../Framework/Core/ConfigManager";
-import { TimerManager } from '../Framework/Core/TimerTool/TimerManager';
+import { TimerManager, TimerGroup } from '../Framework/Core/TimerTool/TimerManager';
 import { UIManager, UILayer } from '../Framework/Core/UIManager';
 import { EventCenter } from "../Framework/Data/EventCenter";
 import { DataKey, EventName, ToastType } from "../Framework/Core/GameConst";
@@ -21,16 +21,11 @@ import { ResManager } from "db://assets/Framework/Core/ResManager";
 import { Logger, LogModule } from "db://assets/Framework/Core/Logger";
 import { PreloadManager } from "db://assets/Framework/Core/PreloadManager";
 import { TweenGroup, TweenUtil } from "db://assets/Framework/Utils/TweenUtil";
-import { IModule } from '../Framework/Core/ModuleSystem';
+import { ILifecycleModule } from '../Framework/Core/ModuleSystem';
 
 const { ccclass } = _decorator;
 
-// ✅ 首屏极简域：仅保留进入大厅/拉取用户基础数据必需的表
-const BOOT_CONFIGS = [
-    'game', 'player', 'codex_view_config'
-];
-
-// ✅ 后台全局与战斗域：推迟至大厅渲染后、玩家无感知的静默阶段下载和构建
+const BOOT_CONFIGS = [ 'game', 'player', 'codex_view_config' ];
 const GLOBAL_AND_BATTLE_CONFIGS = [
     'shop', 'civ_config', 'element', 'stage_growth', 'MonsterCombat', 'wave_dynamic',
     'level', 'skill', 'path', 'merge', 'fx_presets', 'MonsterVisual', 'guide',
@@ -47,15 +42,13 @@ export class GameEntry extends Component {
 
         TimerManager.Instance.doLoop(60, 0, () => {
             ResManager.Instance.clearExpiredLRU();
-        }, this);
+        }, this, TimerGroup.UI);
 
-        // 瞬间弹起护盾掩护黑屏，大厅 Loading 秒出
         await UIManager.Instance.openUI("LoadingUI", "LoadingUI", UILayer.Top, null, "");
 
         let coreReady = false;
         while (!coreReady) {
             try {
-                // ✅ 仅加载极简 Boot 域，砍掉所有重度并发，保障 3 秒大厅畅通
                 await this.loadCoreConfigsWithTimeout();
                 coreReady = true;
             } catch (e) {
@@ -71,7 +64,6 @@ export class GameEntry extends Component {
         let appStarted = false;
         while (!appStarted) {
             try {
-                // 启动基础设施大厅，瞬间上屏
                 await App.Instance.start();
                 appStarted = true;
             } catch (e) {
@@ -80,7 +72,6 @@ export class GameEntry extends Component {
             }
         }
 
-        // 大厅渲染完毕，玩家可以交互时，释放后台静默预加载
         this.preloadBattleInBackground();
     }
 
@@ -90,9 +81,7 @@ export class GameEntry extends Component {
         });
 
         const loadTask = (async () => {
-            // 只加载大厅骨架必须依赖的表，其余全踢到后台
             await ConfigManager.Instance.loadTables(BOOT_CONFIGS, 'config');
-            // 预加载配置计划书
             await PreloadManager.loadConfig('battle_preload_config', 'config');
         })();
 
@@ -102,13 +91,8 @@ export class GameEntry extends Component {
     private async preloadBattleInBackground(): Promise<void> {
         try {
             Logger.info(LogModule.FRAMEWORK, "▶️ 开始静默加载重度配置表与战斗资源...");
-
-            // 将原先阻碍大厅出来的重度表，全部在这里依靠时间分片机制静默加载
             await ConfigManager.Instance.loadTables(GLOBAL_AND_BATTLE_CONFIGS, 'config');
-
-            // 触发 2D/3D 资源的后台静默预热
             await PreloadManager.preloadGroup();
-
         } catch (e) {
             Logger.warn("后台战斗资源预热失败（可在点击战斗时重试）", e);
         }
@@ -136,6 +120,9 @@ export class GameEntry extends Component {
 
     private registerModules(): void {
         const moduleSystem = App.Instance.moduleSystem;
+
+        // 核心重构：将底层服务注册至调度管线，TimerManager 因优先级 10000 必定先于战斗逻辑执行
+        moduleSystem.register("TimerManager", TimerManager.Instance);
         moduleSystem.register("BattleLoop", new BattleLoopModule());
     }
 
@@ -170,21 +157,21 @@ export class GameEntry extends Component {
     }
 }
 
-class BattleLoopModule implements IModule {
+class BattleLoopModule implements ILifecycleModule {
+    public readonly priority = 100; // 优先级在 TimerManager 之后
     private readonly MAX_FRAME_DT: number = 0.05;
-
-    public init(): void {}
-    public start(): void {}
-    public destroy(): void {}
 
     public update(dt: number): void {
         const safeDt = Math.min(dt, this.MAX_FRAME_DT);
-        TimerManager.Instance.update(safeDt);
+
+        // 核心重构：移除了耦合的 TimerManager.Instance.update(safeDt) 调用
+
         if (DataCenter.Instance.get(DataKey.IS_PAUSED)) return;
 
         let timeScale = Number(DataCenter.Instance.get(DataKey.TIME_SCALE));
         if (isNaN(timeScale) || timeScale <= 0) timeScale = 1.0;
         const battleDt = safeDt * timeScale;
+
         // ... (原战斗系统调度将在此接管)
     }
 }

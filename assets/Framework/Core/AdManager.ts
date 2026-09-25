@@ -7,7 +7,7 @@
  */
 
 import { Logger, LogModule } from "./Logger";
-import { DataCenter } from "../Data/DataCenter";
+import {DataCenter, RuntimeDataCenter} from "../Data/DataCenter";
 import { AD_UNIT_MAP, AdPlacement } from "./GameConst";
 import { PlatformManager } from "./Platform/PlatformManager";
 
@@ -38,13 +38,11 @@ export class AdManager {
                 resolve(false);
                 return;
             }
-
             this._isShowing = true;
 
-            // 1. 锁住游戏时钟
-            DataCenter.Instance.addPauseLock("WX_REWARD_AD_LOCK");
+            // ✅ 同步重构：将暂停锁写入纯内存中心，切断 I/O 污染
+            RuntimeDataCenter.Instance.addPauseLock("WX_REWARD_AD_LOCK");
 
-            // 2. 60秒极端未响应兜底，防止底层组件崩溃导致游戏永久卡死
             if (this._deadlockTimer) clearTimeout(this._deadlockTimer);
             this._deadlockTimer = setTimeout(() => {
                 if (this._isShowing) {
@@ -53,7 +51,6 @@ export class AdManager {
                 }
             }, 60000);
 
-            // 3. 调起平台适配层
             PlatformManager.Instance.adapter.showRewardAd(adUnitId).then((success) => {
                 if (this._isShowing) {
                     this.completeAdFlow(resolve, success, success ? "观看完毕" : "中途放弃/失败");
@@ -63,17 +60,17 @@ export class AdManager {
     }
 
     private completeAdFlow(resolve: (success: boolean) => void, success: boolean, reason: string): void {
-        Logger.info(LogModule.APP, `[AdManager] 结算: success=${success}, 原因=${reason}`);
+        Logger.info(LogModule.APP, `[AdManager] completeAdFlow 结算: success=${success}, 原因=${reason}`);
 
         if (this._deadlockTimer) {
             clearTimeout(this._deadlockTimer);
             this._deadlockTimer = null;
         }
-
         this._isShowing = false;
 
         try {
-            DataCenter.Instance.removePauseLock("WX_REWARD_AD_LOCK");
+            // ✅ 同步重构：解除纯内存挂起锁
+            RuntimeDataCenter.Instance.removePauseLock("WX_REWARD_AD_LOCK");
         } catch (e) {
             Logger.warn(LogModule.APP, "解开暂停锁异常", e);
         }

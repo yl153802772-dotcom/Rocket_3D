@@ -2,19 +2,16 @@
  * @module UIManager
  * @description
  * [模块逻辑]
- * 游戏唯一的 UI 管线编排者。本次重构（Priority 5）为 3D/2D 相机分离架构做好了根基铺垫，并彻底修正了 ResType 的语义一致性。
- * 强制剥离了 UI 节点与 3D 渲染层的混合（统一设置 Layers.Enum.UI_2D），为流式加载 3D 战斗场景时大厅 UI 不卡顿提供了核心保障。
- *
- * [调用规则]
- * 1. 禁用任何非标准途径的挂载 UI。必须通过 openUI / openDialog 获取实例。
- * 2. 框架提供 keepAlive 白名单（常驻池）。常驻 UI 关闭时，不再销毁回收节点，但【必须归还自身持有的高清图集与大容量资源】，极大降低游戏在后台时的峰值显存。
+ * 游戏唯一的 UI 管线编排者。本次重构（Priority 7）移除了野蛮的 Canvas 搜索。
+ * UIManager 现直接挂靠至 CameraManager 统筹的 uiCanvasNode 下，彻底完成渲染分层解耦。
  */
 
-import { _decorator, Node, Prefab, instantiate, find, UITransform, UIOpacity, BlockInputEvents, Tween, Vec3, Layers, Widget } from 'cc';
+import { _decorator, Node, Prefab, instantiate, find, UITransform, UIOpacity, BlockInputEvents, Tween, Layers, Widget } from 'cc';
 import { UIBase } from "../Components/UIBase";
 import { ResManager, ResType } from "./ResManager";
 import { UIPool } from "../Components/UIPool";
-import { Logger, LogModule } from "db://assets/Framework/Core/Logger";
+import { Logger, LogModule } from "./Logger";
+import { CameraManager } from "./CameraManager"; // ✅ 导入相机管家
 
 const { ccclass } = _decorator;
 
@@ -59,13 +56,12 @@ export class UIManager {
     ]);
 
     public init(): void {
-        Logger.info(LogModule.UI_MANAGER, "UIManager 初始化 (UI 层与 CameraSystem 隔离铺平)");
+        Logger.info(LogModule.UI_MANAGER, "UIManager 初始化 (通过 CameraManager 接管渲染根节点)");
 
-        // ✅ 渲染层隔离铺垫：强制约束 UIManager 只向名为 "Canvas" 的专属 2D 画布下挂载
-        // 在未来的多相机架构中，这块 Canvas 将专属绑定给 UICamera，完全剥离 3D MainCamera。
-        this._root = find("Canvas");
+        // ✅ 架构解耦：不再硬编码寻找 Canvas，直接读取 CameraSystem 隔离好的 UI 画布
+        this._root = CameraManager.Instance.uiCanvasNode;
         if (!this._root) {
-            Logger.error(LogModule.UI_MANAGER, "致命错误：未找到 2D 正交画布 'Canvas'！");
+            Logger.error(LogModule.UI_MANAGER, "致命错误：未能从 CameraManager 获取到 2D 画布！");
             return;
         }
 
@@ -222,13 +218,10 @@ export class UIManager {
 
     public closeUI(uiName: string): void {
         if (this._isOpeningPopup) return;
-        Logger.info(LogModule.UI_MANAGER, "UI关闭:", uiName);
         const ui = this._uiMap.get(uiName);
         if (!ui) return;
 
         ui.onHide();
-
-        // 强行收回该 UI 周期内借用的显存图集等庞大资产
         ui.releaseTrackedAssets();
 
         const config = this._uiCacheConfig.get(uiName);
@@ -261,7 +254,6 @@ export class UIManager {
         const ui = this._uiMap.get(uiName);
         if (!ui) return;
 
-        // ✅ 核心联动：触发 UIBase 内部的 Sandbox 熔断销毁机制
         ui.onDestroyUI();
 
         if (ui.node && ui.node.isValid) ui.node.destroy();
@@ -291,7 +283,6 @@ export class UIManager {
     public async preloadUI(uiName: string, path: string): Promise<void> {
         try {
             const config = this._uiCacheConfig.get(uiName);
-            // ✅ 对齐全局语义：彻底将错误的 PERMANENT 修正为 EXPLICIT
             const resType = config?.keepAlive ? ResType.EXPLICIT : ResType.NORMAL;
             await ResManager.Instance.load<Prefab>(path, Prefab, undefined, resType);
         } catch (err) {
@@ -309,11 +300,7 @@ export class UIManager {
 
     private createLayer(layer: UILayer): void {
         const node = new Node(layer);
-
-        // ✅ 渲染层核心隔离：强制标记所有 UI 层级的渲染掩码为 UI_2D
-        // 这样在 Cocos 编辑器中，3D 主相机可以轻易过滤掉这些 UI，不再发生 3D 穿透或透视畸变
         node.layer = Layers.Enum.UI_2D;
-
         const transform = node.addComponent(UITransform);
         const canvasTransform = this._root.getComponent(UITransform);
         if (canvasTransform) transform.setContentSize(canvasTransform.contentSize);
@@ -323,7 +310,6 @@ export class UIManager {
 
     private async _loadPrefab(uiName: string, path: string, bundleName?: string): Promise<Prefab> {
         const config = this._uiCacheConfig.get(uiName);
-        // ✅ 对齐全局语义：彻底修正为 EXPLICIT
         const resType = config?.keepAlive ? ResType.EXPLICIT : ResType.NORMAL;
         try {
             const prefab = await ResManager.Instance.load<Prefab>(path, Prefab, bundleName, resType);
@@ -341,10 +327,7 @@ export class UIManager {
     private _getOrCreateMask(): Node {
         if (this._maskNode) return this._maskNode;
         const mask = new Node("UIMask");
-
-        // ✅ 渲染层核心隔离：连遮罩也必须强制归属于 2D 管线
         mask.layer = Layers.Enum.UI_2D;
-
         const trans = mask.addComponent(UITransform);
         trans.setContentSize(750, 1334);
         const opacity = mask.addComponent(UIOpacity);

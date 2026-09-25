@@ -2,43 +2,32 @@
  * @module DataCenter
  * @description
  * [模块逻辑]
- * 全局响应式数据中心（支持强类型、自动持久化同步、变更监听）。
- * 本阶段(Priority 4)升级了与 SaveManager 的联动：此模块的 set() 与 batchUpdate() 现作为“脏标记投递器(Dirty Mask Emitter)”，
- * 极大解放了持久化过程的 CPU 开销。
+ * 数据中心分层治理模块。本次重构（Priority 13）彻底拆分了持久化数据与运行时状态。
+ * 解决了单局临时状态（如暂停锁、时间倍速）误入存档导致的 I/O 浪费与重启状态污染问题。
+ * 已完全对齐最新净化的 GameConst 强类型字典。
  *
  * [调用规则]
- * 1. 禁止业务直接操作底层 _data 字典，必须通过 set() 或 add() 触发响应式变更。
- * 2. 大批量（>3 个）数据同时变化时，必须包裹在 batchUpdate 中，防止高频触发 I/O 节流与 UI 重绘风暴。
+ * 1. 资产/等级/设置等需要跨局保存的数据，调用 ArchiveDataCenter。
+ * 2. 暂停锁/时间缩放/单局标记等，调用 RuntimeDataCenter。
+ * 3. 场景切换或单局结束时，统一调用 RuntimeDataCenter.Instance.clearSession() 一键清理。
  */
+
 import { SaveManager } from '../Core/SaveManager';
 import { DataKey, DataPayloadMap } from '../Core/GameConst';
 import { Logger, LogModule } from '../Core/Logger';
 
 export type DataWatcher<K extends keyof DataPayloadMap> = (newValue: DataPayloadMap[K], oldValue: DataPayloadMap[K]) => void;
 
-export class DataCenter {
-    private static _instance: DataCenter = null;
-    public static get Instance(): DataCenter {
-        if (!this._instance) this._instance = new DataCenter();
-        return this._instance;
-    }
-
-    private _data: Map<string, any> = new Map();
-    private _watchers: Map<string, Function[]> = new Map();
-    private _isBatchUpdating: boolean = false;
-    private _batchChanges: Array<{ key: string; newValue: any; oldValue: any }> = [];
-    private _pauseLocks: Set<string> = new Set();
-    private _codexSet: Set<string> = new Set();
-
-    public init(): void {
-        // 维持所有的 Default 初始化
-    }
-
-    private initDefault<K extends keyof DataPayloadMap>(key: K, defaultValue: DataPayloadMap[K]): void {
-        const keyStr = key as string;
-        const savedValue = SaveManager.Instance.get<DataPayloadMap[K]>(keyStr, defaultValue);
-        this._data.set(keyStr, savedValue);
-    }
+/**
+ * ==========================================
+ * 基类：BaseDataCenter (纯内存响应式数据驱动)
+ * ==========================================
+ */
+export abstract class BaseDataCenter {
+    protected _data: Map<string, any> = new Map();
+    protected _watchers: Map<string, Function[]> = new Map();
+    protected _isBatchUpdating: boolean = false;
+    protected _batchChanges: Array<{ key: string; newValue: any; oldValue: any }> = [];
 
     public get<K extends keyof DataPayloadMap>(key: K): DataPayloadMap[K] {
         return this._data.get(key as string);
@@ -52,8 +41,8 @@ export class DataCenter {
 
         this._data.set(keyStr, value);
 
-        // ✅ 机制说明：此调用仅在 SaveManager 中投递增量脏标记 (dirty key)，绝不会在此帧触发重量级全盘序列化
-        SaveManager.Instance.set(keyStr, value);
+        // 钩子：供子类决定是否需要落盘
+        this.onDataChanged(keyStr, value);
 
         if (this._isBatchUpdating) {
             this._batchChanges.push({ key: keyStr, newValue: value, oldValue });
@@ -67,7 +56,7 @@ export class DataCenter {
         if (!isNaN(currentValue)) {
             this.set(key, (currentValue + delta) as unknown as DataPayloadMap[K]);
         } else {
-            Logger.error(LogModule.DATA, `DataCenter.add 失败: [${key as string}] 数值计算异常！`);
+            Logger.error(LogModule.DATA, `BaseDataCenter.add 失败: [${key as string}] 数值计算异常！`);
         }
     }
 
@@ -84,7 +73,7 @@ export class DataCenter {
             if (oldValue === update.value) continue;
 
             this._data.set(keyStr, update.value);
-            SaveManager.Instance.set(keyStr, update.value);
+            this.onDataChanged(keyStr, update.value);
 
             this._batchChanges.push({
                 key: keyStr,
@@ -111,7 +100,7 @@ export class DataCenter {
                     value: (currentValue + update.delta) as unknown as any,
                 });
             } else {
-                Logger.error(LogModule.DATA, `DataCenter.batchAdd 失败: [${update.key as string}] 数值计算异常！`);
+                Logger.error(LogModule.DATA, `BaseDataCenter.batchAdd 失败: [${update.key as string}] 数值计算异常！`);
             }
         }
         if (batchUpdates.length > 0) this.batchUpdate(batchUpdates);
@@ -134,7 +123,7 @@ export class DataCenter {
         }
     }
 
-    private notifyByKeyRaw(keyStr: string, newValue: any, oldValue: any): void {
+    protected notifyByKeyRaw(keyStr: string, newValue: any, oldValue: any): void {
         if (this._watchers.has(keyStr)) {
             const list = this._watchers.get(keyStr)!;
             const copyList = [...list];
@@ -148,6 +137,63 @@ export class DataCenter {
         }
     }
 
+    // 由子类实现具体的变更联动行为
+    protected abstract onDataChanged(key: string, value: any): void;
+}
+
+
+/**
+ * ==========================================
+ * 存档层：ArchiveDataCenter (严格落盘)
+ * ==========================================
+ */
+export class ArchiveDataCenter extends BaseDataCenter {
+    private static _instance: ArchiveDataCenter = null;
+    public static get Instance(): ArchiveDataCenter {
+        if (!this._instance) this._instance = new ArchiveDataCenter();
+        return this._instance;
+    }
+
+    public init(): void {
+        Logger.info(LogModule.DATA, "ArchiveDataCenter 初始化 (持久化状态中心)");
+    }
+
+    public initDefault<K extends keyof DataPayloadMap>(key: K, defaultValue: DataPayloadMap[K]): void {
+        const keyStr = key as string;
+        const savedValue = SaveManager.Instance.get<DataPayloadMap[K]>(keyStr, defaultValue);
+        this._data.set(keyStr, savedValue);
+    }
+
+    protected onDataChanged(key: string, value: any): void {
+        // ✅ 核心隔离：只有存入 ArchiveDataCenter 的数据，才会投递给 SaveManager 触发落盘脏标记
+        SaveManager.Instance.set(key, value);
+    }
+}
+
+
+/**
+ * ==========================================
+ * 运行时层：RuntimeDataCenter (纯内存隔离)
+ * ==========================================
+ */
+export class RuntimeDataCenter extends BaseDataCenter {
+    private static _instance: RuntimeDataCenter = null;
+    public static get Instance(): RuntimeDataCenter {
+        if (!this._instance) this._instance = new RuntimeDataCenter();
+        return this._instance;
+    }
+
+    private _pauseLocks: Set<string> = new Set();
+
+    public init(): void {
+        Logger.info(LogModule.DATA, "RuntimeDataCenter 初始化 (纯内存临时状态中心)");
+    }
+
+    protected onDataChanged(key: string, value: any): void {
+        // ✅ 核心隔离：运行时数据绝对不触发 SaveManager 写盘，纯内存极速响应
+    }
+
+    /** 战术暂停锁属于严格的单局运行时状态 */
     public addPauseLock(lockName: string) {
         this._pauseLocks.add(lockName);
         this.set(DataKey.IS_PAUSED, true);
@@ -167,22 +213,17 @@ export class DataCenter {
         this.set(DataKey.IS_PAUSED, false);
     }
 
-    public unlockCodexTags(tags: string[]): string[] {
-        if (!tags || tags.length === 0) return [];
-        const newlyUnlocked: string[] = [];
-
-        for (const tag of tags) {
-            if (!this._codexSet.has(tag)) {
-                this._codexSet.add(tag);
-                newlyUnlocked.push(tag);
-            }
-        }
-
-        if (newlyUnlocked.length > 0) {
-            this.set(DataKey.UNLOCKED_CODEX, Array.from(this._codexSet));
-            Logger.info(LogModule.DATA, `📖 写入新图鉴并存盘: ${newlyUnlocked.join(', ')}`);
-        }
-
-        return newlyUnlocked;
+    /**
+     * ✅ 单局重置熔断：切场景或战斗结束时调用，一键清空所有单局临时状态，防止污染下一局
+     */
+    public clearSession(): void {
+        this._data.clear();
+        this.clearAllPauseLocks();
+        // 重置时间缩放等运行态数据
+        this.set(DataKey.TIME_SCALE, 1.0);
+        Logger.info(LogModule.DATA, "🧹 RuntimeDataCenter 单局状态已完全清空");
     }
 }
+
+// ⚠️ 向后兼容导出（建议业务层代码后续逐步替换引入类型，当前可无缝平替）
+export { ArchiveDataCenter as DataCenter };

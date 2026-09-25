@@ -57,10 +57,10 @@ export class AdStrategySystem {
         return success;
     }
 
-    public static isUnderProtection(): boolean {
-        const isTimeProtected = (Date.now() - this._gameStartTime) < 60000;
+    /*public static isUnderProtection(): boolean {
+       /!* const isTimeProtected = (Date.now() - this._gameStartTime) < 60000;
         const currentWave = DataCenter.Instance.get(DataKey.CUR_WAVE_INDEX) as number || 0;
         const isWaveProtected = currentWave < 1;
-        return isTimeProtected || isWaveProtected;
-    }
+        return isTimeProtected || isWaveProtected;*!/
+    }*/
 }

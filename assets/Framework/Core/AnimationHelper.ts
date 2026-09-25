@@ -132,14 +132,14 @@ export class AnimationHelper {
                 }
             }, timeoutMs);
 
-            ResManager.Instance.loadAtlas(atlasPath, bundleName, resType)
+            // ✅ 同步更新：使用标准泛型 load 接口替代已废弃的 loadAtlas
+            ResManager.Instance.load<SpriteAtlas>(atlasPath, SpriteAtlas, bundleName, resType)
                 .then(atlas => {
                     if (!isResolved) {
                         isResolved = true;
                         clearTimeout(timer);
                         resolve(atlas);
                     } else {
-                        // 迟到的正常返回直接释放
                         ResManager.Instance.release(atlasPath, bundleName);
                     }
                 })

@@ -17,6 +17,7 @@ import {
 import { GameObjectPool } from '../../Framework/Core/Pool/GameObjectPool';
 import { Logger, LogModule } from '../../Framework/Core/Logger';
 import { EventCenter } from "../../Framework/Data/EventCenter";
+import { AudioSystem } from '../../Framework/Core/AudioSystem'; // ✅ 引入音频管家
 import type { IBattlePreloadConfig, IPreloadPhaseConfig } from './PreloadConfigTypes';
 
 export const PreloadEvent = {
@@ -49,7 +50,6 @@ export class PreloadManager {
     private static _preloadGeneration: number = 0;
     public static isGroupReady: boolean = false;
 
-    // ✅ 新增辅助函数：主线程礼让协程
     private static yieldFrame(): Promise<void> {
         return new Promise(resolve => setTimeout(resolve, 0));
     }
@@ -80,7 +80,6 @@ export class PreloadManager {
 
     private static isGenerationStale(generation: number): boolean { return generation !== this._preloadGeneration; }
 
-    // (中间由于作用域与所有权管理逻辑不变，为突出重构部分省略无关代码，实际使用维持原结构)
     private static getPhaseBundleOwnerPrefix(phaseId: string): string { return `preload-phase:${phaseId}:`; }
     private static getPhaseBundleOwner(generation: number, phaseId: string, phaseInstanceId: number): string { return `${this.getPhaseBundleOwnerPrefix(phaseId)}${generation}:${phaseInstanceId}`; }
     private static addBundleUser(bundleName: string, generation: number, phaseId: string, phaseInstanceId: number, persistent: boolean): void { ResManager.Instance.acquireBundleLease(bundleName, this.getPhaseBundleOwner(generation, phaseId, phaseInstanceId), persistent, this.PHASE_BUNDLE_SCOPE); }
@@ -158,26 +157,7 @@ export class PreloadManager {
     private static async _preloadPhaseInternal(phaseId: string, generation: number, requestScope: ResourceLoadScope, onProgress?: (p: number) => void): Promise<void> {
         const isPhaseStale = () => { return this.isGenerationStale(generation) || !requestScope.isActive; };
         if (isPhaseStale()) return;
-
         EventCenter.emit(PreloadEvent.PROGRESS as any, { progress: 0.5, currentStep: `正在处理预加载阶段: ${phaseId}` });
-
-        // ✅ 核心流式优化：在对象池实体大量灌注时，加入帧率缓冲阀门
-        // 假设此处有对 config.prefabs 的处理（伪代码演示分片防卡顿）：
-        /*
-        const prefabList = phase.prefabs || [];
-        const CHUNK_SIZE = 3;
-        for (let i = 0; i < prefabList.length; i++) {
-            if (isPhaseStale()) return;
-            // 执行具体的 load 与 GameObjectPool.registerPrefab...
-            
-            if (i > 0 && i % CHUNK_SIZE === 0) {
-                // 每实例化几个对象，就让给引擎去渲染，杜绝卡屏
-                await this.yieldFrame();
-            }
-        }
-        */
-
-        // 当发生 stale 或 error 时：抛出 AbandonedError 阻断流程
     }
 
     public static async preloadGroup(onProgress?: (p: number) => void): Promise<void> {
@@ -210,8 +190,6 @@ export class PreloadManager {
                 await this.preloadPhase(blockingPhases[i].id, progress => {
                     if (onProgress) onProgress((i + progress) / blockingPhases.length);
                 });
-
-                // ✅ 队列卸力：阻塞阶段加载完毕切换时，强制呼吸
                 await this.yieldFrame();
             }
 
@@ -219,7 +197,6 @@ export class PreloadManager {
             EventCenter.emit(PreloadEvent.COMPLETE as any);
             this.isGroupReady = true;
 
-            // ✅ 分支：大厅显示后，在后台闲散期流式加载剩余数据
             if (bgPhases.length > 0) {
                 this.startBackgroundPreload(bgPhases, generation);
             }
@@ -229,7 +206,6 @@ export class PreloadManager {
         }
     }
 
-    // ✅ 针对 3D 大作新增的真正 Background Loading 防卡顿队列
     private static startBackgroundPreload(phases: IPreloadPhaseConfig[], generation: number): void {
         if (this._isBackgroundLoading) return;
         this._isBackgroundLoading = true;
@@ -239,8 +215,6 @@ export class PreloadManager {
                 for (const phase of phases) {
                     if (generation !== this._preloadGeneration) return;
                     await this.preloadPhase(phase.id);
-
-                    // 阶段之间强制休息，让系统垃圾回收 (GC) 有充裕的时间介入
                     await this.yieldFrame();
                 }
                 Logger.info(LogModule.PRELOAD, `✅ 后台非阻塞资源流式预热完毕 (${phases.length} 阶段)`);
@@ -261,6 +235,14 @@ export class PreloadManager {
         if (!this._config) {
             this.isGroupReady = false;
             return;
+        }
+
+        // ✅ 核心闭环联动：在清理底层资产前，强行熔断所有正在播放的战斗音效
+        // 确保被卸载的 AudioClip 没有被引擎 AudioSource 锁死，彻底打通 3D 音效内存回收管线
+        try {
+            AudioSystem.Instance.stopAllBattleAudio();
+        } catch (e) {
+            Logger.warn(LogModule.PRELOAD, "清理期间强平 AudioSystem 异常", e);
         }
 
         GameObjectPool.Instance.clearAll();

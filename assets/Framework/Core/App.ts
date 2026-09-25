@@ -2,16 +2,13 @@
  * @module App
  * @description
  * [模块逻辑]
- * 游戏全局唯一入口与总调度中心。负责初始化所有核心管线（存档、数据、资源、UI、网络等）、绑定微信生命周期，并驱动模块系统心跳。
- *
- * [调用规则]
- * 1. 业务场景的入口脚本（如 GameEntry）必须且只能调用一次 App.Instance.init() 和 start()。
- * 2. 场景切换或玩法完全重置时，必须调用 beforeSceneChange() 闭环清理所有 Tween、动画、临时资源与对象池实体。
+ * 游戏全局唯一入口与总调度中心。
+ * 本次重构在启动管线中注入了 CameraManager，确保在 UI 与 游戏模块加载前，3D/2D 相机系统已完成绝对层级隔离。
  */
 
 import { ModuleSystem } from "./ModuleSystem";
 import { EventCenter } from "../Data/EventCenter";
-import { DataCenter } from "../Data/DataCenter";
+import {ArchiveDataCenter, DataCenter, RuntimeDataCenter} from "../Data/DataCenter";
 import { SaveManager } from "./SaveManager";
 import { AdManager } from "./AdManager";
 import { UILayer, UIManager } from "./UIManager";
@@ -22,12 +19,13 @@ import { TimerManager } from '../Core/TimerTool/TimerManager';
 import { UINavigation } from "../Components/UINavigation";
 import { AudioSystem } from './AudioSystem';
 import { GMManager } from '../Core/GM/GMManager';
-import { director, game, input, Input, EventKeyboard, KeyCode, sys } from "cc";
+import { director, input, Input, EventKeyboard, KeyCode } from "cc";
 import { TweenUtil } from "db://assets/Framework/Utils/TweenUtil";
 import { AnimationHelper } from "db://assets/Framework/Core/AnimationHelper";
 import { DataKey } from "db://assets/Framework/Core/GameConst";
 import { ShareManager } from "db://assets/Framework/Core/ShareManager";
 import { GameObjectPool } from "./Pool/GameObjectPool";
+import { CameraManager } from "./CameraManager"; // ✅ 引入相机管家
 
 declare const wx: any;
 
@@ -53,9 +51,14 @@ export class App {
         this.checkWeChatUpdate();
         await this.initFramework();
 
+        // ✅ 核心依赖修复：顺位调整，必须在 UIManager 初始化前启动相机的物理隔离
+        CameraManager.Instance.init();
         UIManager.Instance.init();
+
         AudioSystem.Instance.init();
-        ShareManager.Instance.init();
+
+        // ✅ 清理架构债务：移除了之前在该处重复调用 ShareManager.Instance.init() 的历史遗留 Bug
+        // (在 01_CoreFramework_Overview.md 中指出的风险已闭环修复)
 
         this.moduleSystem = new ModuleSystem();
         this.moduleSystem.init();
@@ -96,7 +99,11 @@ export class App {
     async initFramework() {
         Logger.info(LogModule.APP, "Framework Starting...");
         await SaveManager.Instance.init();
-        DataCenter.Instance.init();
+
+        // ✅ 同步重构：分别初始化持久化中心与运行时中心
+        ArchiveDataCenter.Instance.init();
+        RuntimeDataCenter.Instance.init();
+        
         ResManager.Instance.init();
         ConfigManager.Instance.init();
         TimerManager.Instance.init();
@@ -122,13 +129,11 @@ export class App {
         if (typeof wx === "undefined") return;
         wx.onHide(() => {
             Logger.info(LogModule.APP, "进入后台，触发强制同步落盘");
-            DataCenter.Instance.set(DataKey.LAST_ONLINE_TIMESTAMP, Date.now());
-            // ✅ 核心闭环：在系统挂起/杀进程前，绕过异步 I/O 队列，强制主线程阻塞式刷写硬盘
+            // ✅ 同步重构：在线时间等需跨档位保存的数据，调用 ArchiveDataCenter
+            ArchiveDataCenter.Instance.set(DataKey.LAST_ONLINE_TIMESTAMP as any, Date.now());
             SaveManager.Instance.saveToDisk(true);
         });
-        wx.onShow(() => {
-            Logger.info(LogModule.APP, "回到前台");
-        });
+        wx.onShow(() => { Logger.info(LogModule.APP, "回到前台"); });
     }
 
     private bindGlobalInput(): void {
