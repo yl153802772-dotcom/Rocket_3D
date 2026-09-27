@@ -15,7 +15,7 @@ import { EventCenter } from '../Data/EventCenter';
 import { DataCenter } from '../Data/DataCenter';
 import { ResManager, ResourceLoadScope, ResType } from '../Core/ResManager';
 import { Logger, LogModule } from '../Core/Logger';
-import { EventPayloadMap, DataPayloadMap } from "../Core/GameConst";
+import { EventPayloadMap, DataPayloadMap } from "db://assets/Framework/Core/GameConst";
 import { TimerGroup, TimerManager } from '../Core/TimerTool/TimerManager';
 
 const { ccclass } = _decorator;

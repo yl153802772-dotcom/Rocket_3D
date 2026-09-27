@@ -1,7 +1,6 @@
 import { _decorator, Button, EventTouch } from 'cc';
 import {AudioSystem} from "db://assets/Framework/Core/AudioSystem";
 import {SFX_UI_PATH} from "db://assets/Framework/Core/AudioConst";
-// import { AudioManager } from '../Core/AudioManager'; // 预留：我们下一步要做的音效管线
 
 const { ccclass, property } = _decorator;
 
@@ -39,7 +38,6 @@ export class SafeButton extends Button {
         // 记录本次成功点击的时间
         this._lastClickTime = now;
 
-        // 🌟 核心接入：调用 playUISound，走无视战术暂停的 UI 音效通道
         if (this.playSound) {
             AudioSystem.Instance.playUISound(SFX_UI_PATH.BTN_CLICK);
         }

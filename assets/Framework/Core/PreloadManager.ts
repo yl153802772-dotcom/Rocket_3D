@@ -17,7 +17,7 @@ import {
 import { GameObjectPool } from '../../Framework/Core/Pool/GameObjectPool';
 import { Logger, LogModule } from '../../Framework/Core/Logger';
 import { EventCenter } from "../../Framework/Data/EventCenter";
-import { AudioSystem } from '../../Framework/Core/AudioSystem'; // ✅ 引入音频管家
+import { AudioSystem } from '../../Framework/Core/AudioSystem';
 import type { IBattlePreloadConfig, IPreloadPhaseConfig } from './PreloadConfigTypes';
 
 export const PreloadEvent = {
@@ -237,8 +237,6 @@ export class PreloadManager {
             return;
         }
 
-        // ✅ 核心闭环联动：在清理底层资产前，强行熔断所有正在播放的战斗音效
-        // 确保被卸载的 AudioClip 没有被引擎 AudioSource 锁死，彻底打通 3D 音效内存回收管线
         try {
             AudioSystem.Instance.stopAllBattleAudio();
         } catch (e) {

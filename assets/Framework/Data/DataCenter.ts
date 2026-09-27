@@ -13,7 +13,7 @@
  */
 
 import { SaveManager } from '../Core/SaveManager';
-import { DataKey, DataPayloadMap } from '../Core/GameConst';
+import { DataKey, DataPayloadMap } from 'db://assets/Framework/Core/GameConst';
 import { Logger, LogModule } from '../Core/Logger';
 
 export type DataWatcher<K extends keyof DataPayloadMap> = (newValue: DataPayloadMap[K], oldValue: DataPayloadMap[K]) => void;

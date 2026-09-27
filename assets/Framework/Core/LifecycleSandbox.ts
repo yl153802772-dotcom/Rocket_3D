@@ -11,9 +11,9 @@
  */
 
 import { EventCenter } from '../Data/EventCenter';
-import { DataCenter } from '../Data/DataCenter';
+import {ArchiveDataCenter, DataCenter, DataWatcher, RuntimeDataCenter} from '../Data/DataCenter';
 import { TimerManager, TimerGroup } from './TimerTool/TimerManager';
-import { EventPayloadMap, DataPayloadMap } from './GameConst';
+import { EventPayloadMap, DataPayloadMap } from 'db://assets/Framework/Core/GameConst';
 import { Logger, LogModule } from './Logger';
 
 export class LifecycleSandbox {
@@ -24,8 +24,24 @@ export class LifecycleSandbox {
     private _dataSandbox: Set<{ key: string, callback: any }> = new Set();
     private _timerSandbox: Set<number> = new Set();
 
+    // 拆分双向数据桶
+    private _archiveDataSandbox: Set<{ key: string, callback: any }> = new Set();
+    private _runtimeDataSandbox: Set<{ key: string, callback: any }> = new Set();
+    
     constructor(ownerName: string = "Unknown") {
         this._ownerName = ownerName;
+    }
+
+    // 代理持久化数据 (如图鉴解锁、金币)
+    public watchArchiveData<K extends keyof DataPayloadMap>(key: K, callback: DataWatcher<K>): void {
+        ArchiveDataCenter.Instance.watch(key, callback);
+        this._archiveDataSandbox.add({ key: key as string, callback });
+    }
+
+    // 代理运行时数据 (如 HP、MP、暂停锁)
+    public watchRuntimeData<K extends keyof DataPayloadMap>(key: K, callback: DataWatcher<K>): void {
+        RuntimeDataCenter.Instance.watch(key, callback);
+        this._runtimeDataSandbox.add({ key: key as string, callback });
     }
 
     /**
@@ -79,6 +95,16 @@ export class LifecycleSandbox {
         if (this._timerSandbox.size > 0) {
             this._timerSandbox.forEach(timerId => TimerManager.Instance.remove(timerId));
             this._timerSandbox.clear();
+        }
+
+        if (this._archiveDataSandbox.size > 0) {
+            this._archiveDataSandbox.forEach(item => ArchiveDataCenter.Instance.unwatch(item.key as any, item.callback));
+            this._archiveDataSandbox.clear();
+        }
+
+        if (this._runtimeDataSandbox.size > 0) {
+            this._runtimeDataSandbox.forEach(item => RuntimeDataCenter.Instance.unwatch(item.key as any, item.callback));
+            this._runtimeDataSandbox.clear();
         }
 
         Logger.info(LogModule.FRAMEWORK, `[Sandbox] 实体 [${this._ownerName}] 的安全沙箱已完全熔断释放`);

@@ -13,7 +13,7 @@
  * 2. 属于长时间存活节点的事件监听（on），务必在关闭（close/onDestroy）时调用 off 进行注销，防止内存及生命周期泄漏。
  * 3. 避免在回调中直接捕获 UI 节点而不管理监听生命周期。
  */
-import { EventPayloadMap } from "../Core/GameConst";
+import { EventPayloadMap } from "db://assets/Framework/Core/GameConst";
 import { Logger, LogModule } from "../Core/Logger";
 
 type EventCallback<K extends keyof EventPayloadMap> = (data: EventPayloadMap[K]) => void;

@@ -1,5 +1,5 @@
 ﻿// Framework/Tools/FXPreviewer/FXDebugPanel.ts
-import { _decorator, Component, Slider, Label, Toggle } from 'cc';
+/*import { _decorator, Component, Slider, Label, Toggle } from 'cc';
 import { ElementType, EventName } from '../../Core/GameConst';
 import { UniversalFXConfig } from '../../Core/Effect/UniversalFXConfig';
 import { EventCenter } from '../../Data/EventCenter';
@@ -91,4 +91,4 @@ export class FXDebugPanel extends Component {
             loop: this._isLoop
         });
     }
-}
+}*/

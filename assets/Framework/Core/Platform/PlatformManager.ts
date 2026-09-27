@@ -31,7 +31,7 @@ class WechatPlatformAdapter implements IPlatformService {
         if (typeof wx === "undefined") return;
         wx.showShareMenu({ withShareTicket: true, menus: ['shareAppMessage', 'shareTimeline'] });
         wx.onShareAppMessage(() => ({
-            title: "元素合成，法阵克敌！快来和我一起守卫文明！",
+            title: "深空火箭",
             query: `shareTime=${Date.now()}`
         }));
 

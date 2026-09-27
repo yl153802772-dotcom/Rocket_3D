@@ -19,7 +19,7 @@ import { TimerManager } from '../Core/TimerTool/TimerManager';
 import { UINavigation } from "../Components/UINavigation";
 import { AudioSystem } from './AudioSystem';
 import { GMManager } from '../Core/GM/GMManager';
-import { director, input, Input, EventKeyboard, KeyCode } from "cc";
+import { director, Director, game, input, Input, EventKeyboard, KeyCode } from "cc";
 import { TweenUtil } from "db://assets/Framework/Utils/TweenUtil";
 import { AnimationHelper } from "db://assets/Framework/Core/AnimationHelper";
 import { DataKey } from "db://assets/Framework/Core/GameConst";
@@ -56,9 +56,6 @@ export class App {
         UIManager.Instance.init();
 
         AudioSystem.Instance.init();
-
-        // ✅ 清理架构债务：移除了之前在该处重复调用 ShareManager.Instance.init() 的历史遗留 Bug
-        // (在 01_CoreFramework_Overview.md 中指出的风险已闭环修复)
 
         this.moduleSystem = new ModuleSystem();
         this.moduleSystem.init();
@@ -118,11 +115,11 @@ export class App {
         Logger.info(LogModule.APP, "App 启动");
         await this.moduleSystem.start();
         this._isStarted = true;
-        director.on("frame-update", this.update, this);
+        director.on(Director.EVENT_BEFORE_UPDATE, this.update, this);
     }
 
-    private update(dt: number): void {
-        this.moduleSystem.update(dt);
+    private update(_dt: number): void {
+        this.moduleSystem.update(game.deltaTime);
     }
 
     private bindLifeCycle(): void {
