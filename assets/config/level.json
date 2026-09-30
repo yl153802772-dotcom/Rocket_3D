@@ -1,0 +1,7 @@
+﻿{
+  "101": {
+    "levelId": 101,
+    "themeBundle": "battle",
+    "envPrefabPath": "prefabs/environments/Env_Theme_Nebula01"
+  }
+}

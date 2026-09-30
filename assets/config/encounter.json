@@ -1,0 +1,8 @@
+[
+  {
+    "id": "test_loop",
+    "type": "DISTORTION",
+    "configId": 1001,
+    "intensity": 0.0
+  }
+]

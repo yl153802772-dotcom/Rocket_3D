@@ -1,0 +1,6 @@
+[
+  { "id": "shield", "zone": 3, "duration": 3, "cooldown": 15 },
+  { "id": "slowmo", "zone": 3, "timeScale": 0.4, "duration": 3, "cooldown": 12 },
+  { "id": "dash", "zone": 4, "duration": 0.3, "cooldown": 8 },
+  { "id": "clear", "zone": 4, "cooldown": 20 }
+]

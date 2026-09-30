@@ -6,6 +6,8 @@ import { _decorator, Component } from 'cc';
 import { App } from '../Framework/Core/App';
 import { TimerManager } from '../Framework/Core/TimerTool/TimerManager';
 import { Logger } from '../Framework/Core/Logger';
+import { ConfigManager } from '../Framework/Core/ConfigManager';
+import { ConfigKey } from './GameConst';
 import { BattleFlow } from './Core/BattleFlow';
 import { CameraRig } from './Core/CameraRig';
 import { InputModule } from './Systems/InputModule';
@@ -14,6 +16,8 @@ import { RocketModule } from './Systems/RocketModule';
 import { SpawnModule } from './Systems/SpawnModule';
 import { HazardModule } from './Systems/HazardModule';
 import { EncounterSystem } from './Systems/EncounterSystem';
+import { CombatModule } from './Systems/CombatModule';
+import { SkillModule } from './Systems/SkillModule';
 
 const { ccclass } = _decorator;
 
@@ -22,8 +26,20 @@ export class GameEntry extends Component {
     async start() {
         Logger.info("深空火箭启动");
         await App.Instance.init();
+        await this.loadConfigs();
         this.registerModules();
         await App.Instance.start();
+    }
+
+    private async loadConfigs(): Promise<void> {
+        try {
+            await ConfigManager.Instance.loadTables(
+                [ConfigKey.BATTLE, ConfigKey.ENCOUNTER, ConfigKey.WEAPON, ConfigKey.SKILL],
+                'config',
+            );
+        } catch (e) {
+            Logger.warn("配置表加载失败，使用默认配置", e);
+        }
     }
 
     private registerModules(): void {
@@ -37,5 +53,7 @@ export class GameEntry extends Component {
         moduleSystem.register("SpawnModule", new SpawnModule());
         moduleSystem.register("HazardModule", new HazardModule());
         moduleSystem.register("EncounterSystem", new EncounterSystem());
+        moduleSystem.register("CombatModule", new CombatModule());
+        moduleSystem.register("SkillModule", new SkillModule());
     }
 }

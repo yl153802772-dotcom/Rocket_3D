@@ -1,0 +1,7 @@
+[
+  { "id": "scatter", "zone": 2, "damage": 10, "cooldown": 0.5, "pattern": "spread", "count": 3, "projectile": "bullet" },
+  { "id": "laser", "zone": 2, "pattern": "beam", "duration": 0.5, "dps": 20 },
+  { "id": "missile", "zone": 3, "damage": 30, "cooldown": 1.2, "pattern": "homing" },
+  { "id": "pierce", "zone": 4, "damage": 25, "cooldown": 1.0, "pattern": "pierce" },
+  { "id": "aoe", "zone": 4, "damage": 40, "cooldown": 2.0, "pattern": "aoe" }
+]

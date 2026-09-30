@@ -1,0 +1,10 @@
+[
+  {
+    "id": "default",
+    "playerMaxHp": 100,
+    "playerHp": 100,
+    "forwardSpeed": 12,
+    "initialScore": 0,
+    "initialDistance": 0
+  }
+]

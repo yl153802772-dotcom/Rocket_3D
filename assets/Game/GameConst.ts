@@ -33,6 +33,10 @@ export enum ConfigKey {
     ROCKET = "rocket",
     METEOR = "meteor",
     PICKUP = "pickup",
+    BATTLE = "battle",
+    ENCOUNTER = "encounter",
+    WEAPON = "weapon",
+    SKILL = "skill",
 }
 
 // =========================================================================
